@@ -10,7 +10,6 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "", {
   apiVersion: "2024-06-20",
 });
 
-// Map to your ONE-TIME Price IDs
 const PLAN_TO_PRICE = {
   bronze: process.env.PRICE_BRONZE,
   silver: process.env.PRICE_SILVER,
@@ -28,13 +27,13 @@ export async function POST(req) {
     const price = PLAN_TO_PRICE[plan];
     if (!price) return NextResponse.json({ error: "invalid_plan" }, { status: 400 });
 
-    // Derive origin for success/cancel URLs (works on Vercel preview + prod)
+    // derive origin for success/cancel URLs (works on Vercel preview + prod)
     const h = await headers();
     const proto = h.get("x-forwarded-proto") || "https";
     const host  = h.get("x-forwarded-host") || h.get("host");
     const origin = `${proto}://${host}`;
 
-    // Discount decision (no stacking): student first; else referral credit if available
+    // Decide discount (no stacking): student first; else referral credit if available
     const isEdu = (user.email || "").toLowerCase().endsWith(".edu");
     const isStudent = profile?.is_student || isEdu;
     const hasReferralCredit = (profile?.referral_credit_available || 0) > 0;
@@ -71,7 +70,7 @@ export async function POST(req) {
         email: user.email || "",
         plan,
         used_referral_credit,
-        ref_code: body?.ref || "", // referrer's user_id if present
+        ref_code: body?.ref || "", // should be a referrer's user_id if present
       },
     });
 
@@ -81,3 +80,4 @@ export async function POST(req) {
     return NextResponse.json({ error: "server_error" }, { status: 500 });
   }
 }
+
