@@ -9,7 +9,7 @@ export async function GET() {
   const root = process.cwd();
   const pub = path.join(root, 'public');
 
-  const filesToCheck = ['manifest.json', 'sw.js', 'offline.html', 'icon-192.png', 'icon-512.png', 'og.png'];
+  const filesToCheck = ['manifest.json', 'sw.js', 'icon-192.png', 'icon-512.png', 'og.png'];
   const files = Object.fromEntries(filesToCheck.map(f => [f, fs.existsSync(path.join(pub, f))]));
 
   // Manifest sanity
