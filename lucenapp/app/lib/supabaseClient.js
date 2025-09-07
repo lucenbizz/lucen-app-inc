@@ -1,16 +1,22 @@
+// app/lib/supabaseClient.js
 'use client';
 
-// IMPORTANT: use @supabase/ssr here, not @supabase/supabase-js directly
-import { createBrowserClient } from '@supabase/ssr';
+import { createClient } from '@supabase/supabase-js';
 
-const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
-
-if (!url || !key) {
-  console.warn('Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in .env.local');
-}
-
-const supabase = createBrowserClient(url, key);
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+  {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      storageKey: 'sb-auth', // optional custom key
+    },
+    // optional tuning for realtime client on the browser
+    realtime: {
+      params: { eventsPerSecond: 3 },
+    },
+  }
+);
 
 export default supabase;
-
