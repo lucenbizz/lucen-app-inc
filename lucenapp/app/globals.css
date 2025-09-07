@@ -1,0 +1,113 @@
+/* app/globals.css */
+
+/* Tailwind v4 */
+@import "tailwindcss";
+
+/* === Lucen theme (black & gold) === */
+:root{
+  --bg:#0a0a0a;
+  --panel:#0f0f0f;
+  --panel-2:#111;
+  --border:#1c1c1c;
+  --muted:#a3a3a3;
+
+  /* Gold palette */
+  --gold-300:#f5e6a8;
+  --gold-400:#ebcf6a;
+  --gold-500:#d4af37;
+  --gold-600:#b9922a;
+  --gold-700:#8a6b1a;
+
+  --ring:#d4af37;
+  --shadow: 0 10px 30px rgba(0,0,0,.35);
+}
+
+html,body{ background:var(--bg); color:#ededed; }
+
+/* Container that never hugs edges on mobile */
+.container-safe{ width:min(100% - 2rem, 1120px); margin-inline:auto; }
+
+/* Brand gradient + text utilities */
+.gold-text{ 
+  background:linear-gradient(92deg, var(--gold-400), var(--gold-600));
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+}
+.gold-border{ border-color: color-mix(in srgb, var(--gold-600) 30%, var(--border)); }
+.gold-glow{ box-shadow: 0 0 0 1px color-mix(in srgb, var(--gold-600) 35%, transparent), 0 8px 30px rgba(212,175,55,.18); }
+
+/* Card / Panel */
+.card{
+  background: linear-gradient(180deg, rgba(255,255,255,.02), rgba(255,255,255,0)) ,
+              linear-gradient(180deg, var(--panel), var(--panel-2));
+  border:1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+}
+
+/* Buttons */
+.btn{
+  --tw-ring-color: transparent;
+  display:inline-flex; align-items:center; justify-content:center;
+  gap:.5rem; font-weight:600; border-radius:12px; padding:.6rem 1rem;
+  border:1px solid var(--border); background:#121212; transition: all .18s ease;
+}
+.btn:hover{ transform:translateY(-1px); border-color:#2a2a2a; }
+.btn:active{ transform:translateY(0); }
+
+.btn-primary{
+  color:#101010; background:
+    linear-gradient(92deg, var(--gold-400), var(--gold-600));
+  border-color: color-mix(in srgb, var(--gold-600) 45%, transparent);
+  position:relative; overflow:hidden;
+}
+.btn-primary::after{
+  content:""; position:absolute; inset:0; background:
+    linear-gradient( to right, transparent, rgba(255,255,255,.25), transparent);
+  translate:-100% 0; animation: btn-shine 2.4s infinite;
+}
+@keyframes btn-shine{ 0%{translate:-120% 0} 60%{translate:120% 0} 100%{translate:120% 0} }
+
+.btn-outline{
+  background:transparent; color:var(--gold-500); border-color:var(--gold-700);
+}
+.btn-outline:hover{ background:rgba(212,175,55,.08); }
+
+/* Inputs */
+.input{
+  width:100%; background:#0e0e0e; border:1px solid var(--border);
+  border-radius:12px; padding:.65rem .8rem; color:#ededed;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.input:focus{
+  outline:none; border-color:var(--gold-600);
+  box-shadow:0 0 0 3px color-mix(in srgb, var(--gold-600) 35%, transparent);
+}
+
+/* Badges & small UI */
+.badge{
+  display:inline-flex; align-items:center; gap:.4rem;
+  font-size:.72rem; padding:.25rem .5rem; border-radius:999px;
+  border:1px solid var(--border); background:#0e0e0e;
+}
+.badge.gold{ border-color: color-mix(in srgb, var(--gold-600) 35%, var(--border)); color:var(--gold-400); }
+
+/* Table polish */
+.table{
+  width:100%; border-collapse:separate; border-spacing:0;
+}
+.table thead th{
+  position:sticky; top:0; background:#111; border-bottom:1px solid var(--border);
+  font-size:.85rem; color:#d6d6d6; text-transform:uppercase; letter-spacing:.02em;
+}
+.table tbody tr:nth-child(odd){ background:#0b0b0b; }
+.table tbody tr:nth-child(even){ background:#0d0d0d; }
+.table td, .table th{ padding:.65rem .75rem; border-bottom:1px solid #151515; }
+
+/* Page chrome: faint grid + vignette for depth (subtle) */
+body::before{
+  content:""; position:fixed; inset:0; pointer-events:none; z-index:-1;
+  background:
+    radial-gradient(1000px 600px at 120% -10%, rgba(212,175,55,.06), transparent 60%),
+    radial-gradient(1000px 600px at -20% 110%, rgba(212,175,55,.05), transparent 60%),
+    linear-gradient(transparent 0, rgba(0,0,0,.4));
+}

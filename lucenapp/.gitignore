@@ -1,0 +1,13 @@
+# Node / Next
+node_modules/
+.next/
+out/
+.npm/
+*.log
+
+"
+.env
+.env.*
+!.env.example
+.vercel/ 
+.DS_Store

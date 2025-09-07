@@ -1,0 +1,17 @@
+# Node / Next
+**/node_modules/
+**/.next/
+out/
+dist/
+*.log
+npm-debug.log*
+yarn-error.log*
+
+# Env & local
+.env
+.env.*
+!.env.example
+.vercel/
+
+# OS/editor
+.DS_Store
