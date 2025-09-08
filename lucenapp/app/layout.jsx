@@ -2,11 +2,11 @@
 import './globals.css';
 import React from 'react';
 
-import { ErrorProvider } from '../components/ErrorProvider';
-import ConnectionBar from '../components/ConnectionBar';
-import WireGlobalHandlers from '../components/WireGlobalHandlers';
-import GlobalSpinner from '../components/GlobalSpinner';
-import ServiceWorkerRegister from '../components/ServiceWorkerRegister';
+import { ErrorProvider } from './components/ErrorProvider';
+import ConnectionBar from './components/ConnectionBar';
+import WireGlobalHandlers from './components/WireGlobalHandlers';
+import GlobalSpinner from './components/GlobalSpinner';
+import ServiceWorkerRegister from './components/ServiceWorkerRegister';
 
 // ----- Metadata & Viewport -----
 const SITE_URL =
