@@ -1,66 +1,37 @@
-// lib/supabaseServerClient.js
-import { cookies } from 'next/headers';
+// app/lib/supabaseServerClient.js
+import { cookies, headers } from 'next/headers';
 import { createServerClient } from '@supabase/ssr';
 
-const URL = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-const ANON = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
-
-/**
- * Use in Server Components (pages/layouts/loaders).
- * Read-only cookie access to avoid Next 15 write restriction.
- */
-export async function createSupabaseServerClientReadonly() {
-  const cookieStore = await cookies(); // Next 15: must await
-  return createServerClient(URL, ANON, {
-    cookies: {
-      get(name) {
-        return cookieStore.get(name)?.value;
+export function getSupabaseServer() {
+  const cookieStore = cookies();
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+    {
+      cookies: {
+        get: (name) => cookieStore.get(name)?.value,
+        set: (name, value, options) => {
+          // In server components, next/headers cookieStore is read-only for mutation;
+          // only use set/remove in Route Handlers or Server Actions.
+        },
+        remove: (name, options) => {
+          // same note as above
+        },
       },
-      // No-ops to satisfy the API without triggering Next's restriction
-      set() {},
-      remove() {},
-    },
-  });
+    }
+  );
 }
 
-/**
- * Use ONLY in Route Handlers (/app/api/*) or Server Actions.
- * Allows Supabase to refresh/set auth cookies.
- */
-export async function createSupabaseRouteClient() {
-  const cookieStore = await cookies();
-  return createServerClient(URL, ANON, {
-    cookies: {
-      get(name) {
-        return cookieStore.get(name)?.value;
-      },
-      set(name, value, options) {
-        cookieStore.set({ name, value, ...options });
-      },
-      remove(name, options) {
-        cookieStore.set({ name, value: '', ...options, expires: new Date(0) });
-      },
-    },
-  });
-}
-
-/** Helpers for common Server Component usage */
-export async function getUser() {
-  const supabase = await createSupabaseServerClientReadonly();
-  const { data: { user } } = await supabase.auth.getUser();
-  return { supabase, user };
-}
-
+// Simple helper most pages need
 export async function getUserAndProfile() {
-  const supabase = await createSupabaseServerClientReadonly();
+  const supabase = getSupabaseServer();
   const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return { supabase, user: null, profile: null };
+  if (!user) return { user: null, profile: null };
 
   const { data: profile } = await supabase
     .from('profiles')
-    .select('id, email, role, plan, ebooks_quota, priority_delivery, vip_badge')
+    .select('*')
     .eq('id', user.id)
     .single();
-
-  return { supabase, user, profile: profile ?? null };
+  return { user, profile };
 }
