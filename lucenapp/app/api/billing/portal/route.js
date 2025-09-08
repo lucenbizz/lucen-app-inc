@@ -1,49 +1,81 @@
-import Stripe from "stripe";
-import { NextResponse } from "next/server";
-import { headers } from "next/headers";
-import { getUserAndProfile } from "../../../lib/supabaseServerClient.js"; 
-import { createSupabaseAdmin } from "../../../lib/supabaseAdmin.js";       
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+// app/api/billing/portal/route.js
+export const runtime = 'nodejs';
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "", {
-  apiVersion: "2024-06-20",
-});
+import { NextResponse } from 'next/server';
+import { headers, cookies } from 'next/headers';
+import Stripe from 'stripe';
+import { createServerClient } from '@supabase/ssr';
 
-export async function POST() {
-  try {
-    const { user, profile } = await getUserAndProfile();
-    if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+function baseUrlFromHeaders(h) {
+  const proto = h.get('x-forwarded-proto') || 'https';
+  const host = h.get('x-forwarded-host') || h.get('host');
+  return `${proto}://${host}`;
+}
 
-    // Try stored customer id first
-    let customerId = profile?.stripe_customer_id || null;
-
-    // If missing, try to find by email and persist for next time
-    if (!customerId && user.email) {
-      const found = await stripe.customers.list({ email: user.email, limit: 1 });
-      if (found.data?.length) {
-        customerId = found.data[0].id;
-        const admin = createSupabaseAdmin();
-        await admin.from("profiles").update({ stripe_customer_id: customerId }).eq("id", user.id);
-      }
+export async function POST(req) {
+  // Edge-safe Supabase server client (works in Node runtime too)
+  const cookieStore = cookies();
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+    {
+      cookies: {
+        get: (name) => cookieStore.get(name)?.value,
+        set: (name, value, options) => cookieStore.set({ name, value, ...options }),
+        remove: (name, options) => cookieStore.set({ name, value: '', ...options }),
+      },
     }
+  );
 
-    if (!customerId) return NextResponse.json({ error: "no_customer" }, { status: 404 });
+  // Auth required
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
 
-    // Build return URL from request origin
-    const h = await headers();
-    const proto = h.get("x-forwarded-proto") || "https";
-    const host  = h.get("x-forwarded-host") || h.get("host");
-    const origin = `${proto}://${host}`;
+  // Load (or create) Stripe customer id from your profiles table
+  const { data: profile, error: profErr } = await supabase
+    .from('profiles')
+    .select('stripe_customer_id')
+    .eq('id', user.id)
+    .single();
 
-    const portal = await stripe.billingPortal.sessions.create({
-      customer: customerId,
-      return_url: `${origin}/dashboard`,
-    });
-
-    return NextResponse.json({ url: portal.url }, { status: 200 });
-  } catch (e) {
-    console.error("portal error", e);
-    return NextResponse.json({ error: "server_error" }, { status: 500 });
+  if (profErr) {
+    return NextResponse.json({ error: profErr.message || 'profile_lookup_failed' }, { status: 400 });
   }
+
+  const secret = process.env.STRIPE_SECRET_KEY;
+  if (!secret) {
+    // Don’t throw at import/build time; return a clear runtime error
+    return NextResponse.json({ error: 'Missing STRIPE_SECRET_KEY' }, { status: 500 });
+  }
+
+  // Initialize Stripe *inside* the handler using the secret
+  const stripe = new Stripe(secret, { apiVersion: '2024-06-20' });
+
+  let customerId = profile?.stripe_customer_id;
+
+  // If you don’t store the customer yet, try to find/create one
+  if (!customerId) {
+    const existing = await stripe.customers.list({ email: user.email, limit: 1 });
+    if (existing.data[0]) {
+      customerId = existing.data[0].id;
+    } else {
+      const created = await stripe.customers.create({
+        email: user.email,
+        metadata: { supabase_user_id: user.id },
+      });
+      customerId = created.id;
+    }
+    // Persist on your profile for next time (ignore errors)
+    await supabase.from('profiles').update({ stripe_customer_id: customerId }).eq('id', user.id);
+  }
+
+  const h = headers();
+  const returnUrl = `${baseUrlFromHeaders(h)}/dashboard`;
+
+  const session = await stripe.billingPortal.sessions.create({
+    customer: customerId,
+    return_url: returnUrl,
+  });
+
+  return NextResponse.json({ url: session.url });
 }
