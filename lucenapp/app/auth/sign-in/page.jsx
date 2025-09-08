@@ -1,15 +1,11 @@
-// app/auth/sign-in/page.jsx (Server)
-import { getUser } from "../../lib/supabaseServerClient";
-import SignInClient from "./SignInClient";
-
-export default async function Page({ searchParams }) {
-  const { user } = await getUser();
-  const next = typeof searchParams?.next === "string" ? searchParams.next : "/dashboard";
-  if (user) {
-    // Already signed in → go where they intended (or dashboard)
-    // Using Next's redirect on server:
-    const { redirect } = await import("next/navigation");
-    redirect(next);
-  }
-  return <SignInClient next={next} />;
+export const dynamic = 'force-dynamic'; // optional
+import SignInClient from './SignInClient';
+export default function Page() {
+  return (
+    <main className="container-safe p-6">
+      <h1 className="text-2xl font-bold mb-4">Sign in</h1>
+      <SignInClient />
+    </main>
+  );
 }
+
