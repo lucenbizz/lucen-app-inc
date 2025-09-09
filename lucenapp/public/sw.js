@@ -1,11 +1,8 @@
-// public/sw.js — minimal PWA SW (no offline caching/fallback)
-self.addEventListener('install', (event) => {
-  // Take control immediately on update
+/* silent, minimal PWA service worker */
+self.addEventListener('install', (e) => {
   self.skipWaiting();
 });
-
-self.addEventListener('activate', (event) => {
-  // Become the active SW for all clients right away
-  event.waitUntil(self.clients.claim());
+self.addEventListener('activate', (e) => {
+  clients.claim();
 });
-
+/* Optional: add fetch caching later—keep it silent for now */
