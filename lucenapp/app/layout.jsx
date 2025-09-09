@@ -1,7 +1,7 @@
 // app/layout.jsx
 import './globals.css';
 import React from 'react';
-import ServiceWorkerRegister from '../components/ServiceWorkerRegister';
+import ServiceWorkerRegister from './components/ServiceWorkerRegister';
 
 const SITE_URL =
   process.env.NEXT_PUBLIC_SITE_URL ||
