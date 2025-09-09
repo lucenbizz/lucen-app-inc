@@ -34,7 +34,6 @@ export async function POST(req) {
       const plan = session.metadata?.plan;           // 'bronze' | 'silver' | 'gold' | 'black'
       const user_id = session.metadata?.user_id;     // from checkout creation
       const email = session.metadata?.email || session.customer_details?.email || null;
-      const customerId = session.customer || null; 
 
       if (user_id && plan) {
         const supa = createSupabaseAdmin();
