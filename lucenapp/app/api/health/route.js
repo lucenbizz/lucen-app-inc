@@ -9,13 +9,13 @@ export async function GET() {
   const root = process.cwd();
   const pub = path.join(root, 'public');
 
-  const filesToCheck = ['manifest.json', 'sw.js', 'icon-192.png', 'icon-512.png', 'og.png'];
+  const filesToCheck = ['manifest.webmanifest', 'sw.js', 'icon-192.png', 'icon-512.png', 'og.png'];
   const files = Object.fromEntries(filesToCheck.map(f => [f, fs.existsSync(path.join(pub, f))]));
 
   // Manifest sanity
   let manifestOk = false;
   try {
-    const text = fs.readFileSync(path.join(pub, 'manifest.json'), 'utf8');
+    const text = fs.readFileSync(path.join(pub, 'manifest.webmanifest'), 'utf8');
     const m = JSON.parse(text);
     const sizes = (m.icons || []).map(i => String(i.sizes));
     manifestOk = sizes.some(s => s.includes('192')) && sizes.some(s => s.includes('512'));
