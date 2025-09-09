@@ -22,10 +22,6 @@ export function getSupabaseServer() {
   );
 }
 
-/**
- * For Route Handlers (app/api/**/route.js).
- * In route handlers, cookies() is writable, so we can set/remove as needed.
- */
 export function getSupabaseRouteClient() {
   const cookieStore = cookies(); // writable in Route Handlers
   return createServerClient(

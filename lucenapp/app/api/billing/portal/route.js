@@ -12,7 +12,7 @@ function baseUrlFromHeaders(h) {
   return `${proto}://${host}`;
 }
 
-export async function POST(req) {
+export async function POST() {
   // Edge-safe Supabase server client (works in Node runtime too)
   const cookieStore = cookies();
   const supabase = createServerClient(

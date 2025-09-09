@@ -5,7 +5,6 @@ import { headers } from "next/headers";
 
 
 import { getUserAndProfile } from "../../../lib/supabaseServerClient.js";
-// import { getUserAndProfile } from "../../../../lib/supabaseServerClient.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

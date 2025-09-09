@@ -1,13 +1,13 @@
-// app/staff/layout.jsx
+// app/admin/layout.jsx
 import { redirect } from 'next/navigation';
 import { getSupabaseServer } from '../lib/supabaseServerClient';
 
-export const metadata = { title: 'Staff — Lucen' };
+export const metadata = { title: 'Admin — Lucen' };
 
-export default async function StaffLayout({ children }) {
+export default async function AdminLayout({ children }) {
   const supabase = getSupabaseServer();
   const { data: { user } } = await supabase.auth.getUser();
-  if (!user) redirect('/auth/sign-in?next=/staff');
+  if (!user) redirect('/auth/sign-in?next=/admin');
 
   const { data: prof } = await supabase
     .from('profiles')
@@ -15,7 +15,7 @@ export default async function StaffLayout({ children }) {
     .eq('id', user.id)
     .single();
 
-  if (!prof || !['staff', 'admin'].includes(prof.role)) {
+  if (!prof || prof.role !== 'admin') {
     redirect('/forbidden');
   }
 
