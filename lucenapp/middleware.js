@@ -2,73 +2,42 @@
 import { NextResponse } from 'next/server';
 import { createServerClient } from '@supabase/ssr';
 
-function isStaffLike(profile) {
-  return !!(
-    profile?.is_admin ||
-    profile?.is_staff ||
-    profile?.role === 'admin' ||
-    profile?.role === 'staff'
-  );
-}
+export const config = {
+  // Only protect what needs auth. Everything else (icons, manifest, _next, sw.js) bypasses.
+  matcher: [
+    '/dashboard/:path*',
+    '/staff/:path*',
+    '/Admin/:path*',
+    '/api/billing/:path*',
+  ],
+};
 
 export async function middleware(req) {
-  const { pathname } = req.nextUrl;
-
-  // Only guard these namespaces
-  const protectStaff = pathname.startsWith('/Admin') || pathname.startsWith('/staff');
-  const guardDashboard = pathname.startsWith('/dashboard');
-
-  // Prepare a mutable response so Supabase can update auth cookies if needed
   const res = NextResponse.next();
 
-  // Supabase SSR client from cookies/headers
+  // Supabase server client wired to cookies
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
     {
       cookies: {
-        getAll: () => req.cookies.getAll(),
-        setAll: (cookies) => cookies.forEach(({ name, value, ...opts }) => res.cookies.set(name, value, opts)),
+        get: (name) => req.cookies.get(name)?.value,
+        set: (name, value, options) => res.cookies.set(name, value, options),
+        remove: (name, options) => res.cookies.set(name, '', { ...options, maxAge: 0 }),
       },
-      headers: { get: (k) => req.headers.get(k) || undefined },
     }
   );
 
-  const { data: { user } } = await supabase.auth.getUser();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
 
-  // Staff/admin spaces require auth + staff role
-  if (protectStaff) {
-    if (!user) {
-      return NextResponse.redirect(
-        new URL(`/auth/sign-in?next=${encodeURIComponent(pathname)}`, req.url)
-      );
-    }
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('role,is_staff,is_admin')
-      .eq('id', user.id)
-      .single();
-
-    if (!isStaffLike(profile)) {
-      return NextResponse.redirect(new URL('/forbidden', req.url));
-    }
-    return res;
-  }
-
-  // Dashboard: require auth but DO NOT enforce staff
-  if (guardDashboard) {
-    if (!user) {
-      return NextResponse.redirect(
-        new URL('/auth/sign-in?next=/dashboard', req.url)
-      );
-    }
-    return res;
+  if (!user) {
+    const url = req.nextUrl.clone();
+    url.pathname = '/auth/sign-in';
+    url.searchParams.set('next', req.nextUrl.pathname);
+    return NextResponse.redirect(url);
   }
 
   return res;
 }
-
-// Only run on these routes (note: NOT manifest/sw/static)
-export const config = {
-  matcher: ['/dashboard/:path*', '/Admin/:path*', '/staff/:path*'],
-};
