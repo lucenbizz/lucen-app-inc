@@ -4,6 +4,7 @@ import { getUser } from '../lib/supabaseServerClient';
 import { isAdmin } from '../lib/roles';
 import PlanBadge from '../components/PlanBadge';
 import DashboardClient from './DashboardClient';
+import RequireAuth from '../components/RequireAuth';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -16,11 +17,13 @@ export default async function Page() {
   if (isAdmin(profile, user)) redirect('/Admin');
 
   return (
+   <RequireAuth>
     <main className="container-safe py-6 space-y-6">
       <h1 className="text-2xl font-bold gold-text">Dashboard</h1>
       <PlanBadge />
       <DashboardClient />
     </main>
+    </RequireAuth> 
   );
 }
 
