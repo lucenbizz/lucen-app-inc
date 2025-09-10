@@ -2,6 +2,7 @@
 import './globals.css';
 import React from 'react';
 import ServiceWorkerRegister from './components/ServiceWorkerRegister';
+import AuthSync from './components/AuthSync';
 
 const SITE_URL =
   process.env.NEXT_PUBLIC_SITE_URL ||
@@ -11,7 +12,7 @@ export const metadata = {
   metadataBase: new URL(SITE_URL),
   title: 'Lucen — Self Improvement, Ebooks & Scheduling',
   description: 'Premium self-improvement ebooks, flexible scheduling, and referral rewards.',
-  manifest: '/manifest.webmanifest',            // <- add this line
+  manifest: '/manifest.webmanifest',
   icons: {
     icon: [
       { url: '/icon-32.png', sizes: '32x32' },
@@ -46,6 +47,9 @@ export default function RootLayout({ children }) {
   return (
     <html lang="en">
       <body className="min-h-screen bg-[#0a0a0a] text-[#ededed]">
+        {/* Keep server cookies in sync with client auth state */}
+        <AuthSync />
+        {/* Register PWA service worker */}
         <ServiceWorkerRegister />
         {children}
       </body>
