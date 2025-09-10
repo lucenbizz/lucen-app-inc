@@ -16,6 +16,7 @@ const cspParts = [
   `connect-src 'self' https://khzbliduummbypuxqnfn.supabase.co wss://khzbliduummbypuxqnfn.supabase.co https://*.supabase.co wss://*.supabase.co ${STRIPE_JS} ${STRIPE_CHECKOUT} ${STRIPE_BILLING}`,
   `frame-src 'self' ${STRIPE_CHECKOUT} ${STRIPE_BILLING}`,
   "worker-src 'self' blob:",
+  "manifest-src 'self'",        
   "base-uri 'self'",
   // Allow posting to Stripe hosted pages (redirected Checkout/Portal flows)
   `form-action 'self' ${STRIPE_CHECKOUT} ${STRIPE_BILLING}`,
