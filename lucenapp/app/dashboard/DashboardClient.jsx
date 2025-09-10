@@ -128,7 +128,7 @@ export default function DashboardClient() {
   return (
     <div className="container-safe p-4 space-y-10">
       <header className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Lucen Admin Dashboard</h1>
+        <h1 className="text-2xl font-bold">Lucen Dashboard</h1>
         <span className={`text-sm px-2 py-1 rounded-full border ${online ? 'border-green-500' : 'border-red-500'}`}>
           {online ? 'Online' : 'Offline'}
         </span>
