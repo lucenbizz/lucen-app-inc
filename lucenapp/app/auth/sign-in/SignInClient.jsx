@@ -1,29 +1,8 @@
+// app/auth/sign-in/SignInClient.jsx
 'use client';
 import { useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import supabase from '../../lib/supabaseClient';
-
-// Conservative client-side check (server still enforces in /dashboard)
-function isProbablyAdmin(profile, user) {
-  const email = (user?.email || '').toLowerCase();
-  return (
-    profile?.role === 'admin' ||
-    profile?.is_admin === true ||
-    profile?.is_staff === true ||
-    email === 'zayhubbard4@yahoo.com' // fallback allowlist
-  );
-}
-
-// Ask the server who we are (preferred, avoids trusting client state)
-async function fetchMe() {
-  try {
-    const res = await fetch('/api/me', { cache: 'no-store' });
-    if (!res.ok) return null;
-    return await res.json(); // expect { user, profile, ... }
-  } catch {
-    return null;
-  }
-}
 
 export default function SignInClient() {
   const router = useRouter();
@@ -35,27 +14,17 @@ export default function SignInClient() {
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(false);
 
-  async function goToCorrectPlace(fallbackUser = null) {
-    // Prefer server’s verdict; fall back to a local guess if needed.
-    const me = await fetchMe();
-    const user = me?.user ?? fallbackUser;
-    const profile = me?.profile ?? null;
-
-    const dest = isProbablyAdmin(profile, user) ? '/Admin' : next;
-    router.replace(dest);
-    router.refresh(); // make sure server sees the new auth cookie
-  }
-
-  // If already signed in, bounce appropriately
+  // Already signed in? Go to server-gated destination.
   useEffect(() => {
     (async () => {
       const { data: { user } } = await supabase.auth.getUser();
       if (user) {
-        await goToCorrectPlace(user);
+        router.replace(next);
+        router.refresh();
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // run once
+  }, []);
 
   async function onSubmit(e) {
     e.preventDefault();
@@ -70,8 +39,16 @@ export default function SignInClient() {
       return;
     }
 
-    // data.user can be null here (depends on SDK), so we still call /api/me
-    await goToCorrectPlace(data?.user ?? null);
+    // Push session to server cookies immediately (avoid race)
+    const { session } = data || {};
+    await fetch('/api/auth/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ event: 'SIGNED_IN', session }),
+    });
+
+    router.replace(next);
+    router.refresh();
   }
 
   return (
