@@ -11,7 +11,7 @@ export default function Page() {
   return (
     <RequireAuth>
       <main className="container-safe py-6 space-y-6">
-        <h1 className="text-2xl font-bold gold-text">Lucen Admin Dashboard</h1>
+        <h1 className="text-2xl font-bold gold-text">Lucen Dashboard</h1>
 
         {/* If either child throws on the client/hydration, only that panel fails */}
         <ClientBoundary label="PlanBadge">
