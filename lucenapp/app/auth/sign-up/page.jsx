@@ -1,15 +1,23 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import supabase from '../../lib/supabaseClient'; // keep if this path is correct
+import supabase from '../../lib/supabaseClient';
 
 export default function SignUpPage() {
+  return (
+    <Suspense fallback={<main className="max-w-md mx-auto p-6">Loading…</main>}>
+      <SignUpForm />
+    </Suspense>
+  );
+}
+
+function SignUpForm() {
   const router = useRouter();
   const sp = useSearchParams();
   const next = sp?.get('next') || '/dashboard';
 
-  const [email, setEmail]   = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(false);
