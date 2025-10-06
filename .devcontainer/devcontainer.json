@@ -1,28 +1,24 @@
 {
   "name": "Lucen",
-  // Open VS Code at the subfolder by default
   "workspaceFolder": "/workspaces/lucen-app-inc/lucenapp",
-
-  // Use a Node image (adjust version if you need)
   "image": "mcr.microsoft.com/devcontainers/javascript-node:20",
 
-  // After container is created, install deps in lucenapp
-  "postCreateCommand": "cd lucenapp && npm install",
+  // We're already in /lucenapp, so just install here.
+  "postCreateCommand": "npm ci",
 
-  // When you attach, ensure terminal starts in lucenapp
-  "postAttachCommand": {
-    "server": "cd lucenapp"
-  },
+  // Remove postAttachCommand entirely (or keep a single string that doesn't cd).
+  // "postAttachCommand": "echo Ready",
 
-  // Forward Next.js dev port
   "forwardPorts": [3000],
 
-  // Optional VS Code settings inside Codespace (redundant with .vscode, but handy)
   "customizations": {
     "vscode": {
       "settings": {
-        "terminal.integrated.cwd": "lucenapp"
+        // Let the terminal open at workspaceFolder (.)
+        // Using "lucenapp" here would create /lucenapp/lucenapp again.
+        "terminal.integrated.cwd": "."
       }
     }
   }
 }
+
