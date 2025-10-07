@@ -1,47 +1,42 @@
 // app/api/auth/sync/route.js
+export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 import { NextResponse } from 'next/server';
-import { cookies } from 'next/headers';
-import { createServerClient } from '@supabase/ssr';
 
-function serverClient() {
-  const cookieStore = cookies();
-  return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-    {
-      cookies: {
-        get(name) {
-          return cookieStore.get(name)?.value;
-        },
-        set(name, value, options) {
-          cookieStore.set({ name, value, ...options });
-        },
-        remove(name, options) {
-          cookieStore.set({ name, value: '', ...options, maxAge: 0 });
-        },
-      },
-    }
-  );
+function cookieNames() {
+  // Derive your Supabase project ref from the URL env
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+  const m = url.match(/^https?:\/\/([a-z0-9-]+)\.supabase\.co/i);
+  const ref = m?.[1] || 'khzbliduummbypuxqnfn'; // fallback to your ref
+  return {
+    auth: `sb-${ref}-auth-token`,
+    refresh: `sb-${ref}-refresh-token`,
+  };
 }
 
 export async function POST(req) {
-  try {
-    const { session } = await req.json().catch(() => ({ session: null }));
-    const supa = serverClient();
+  const { access_token, refresh_token, expires_at } = await req.json();
 
-    if (session?.access_token && session?.refresh_token) {
-      await supa.auth.setSession({
-        access_token: session.access_token,
-        refresh_token: session.refresh_token,
-      });
-    } else {
-      await supa.auth.signOut();
-    }
-
-    return NextResponse.json({ ok: true });
-  } catch (e) {
-    return NextResponse.json({ ok: false, error: String(e?.message || e) }, { status: 400 });
+  if (!access_token || !refresh_token) {
+    return NextResponse.json({ error: 'Missing tokens' }, { status: 400 });
   }
+
+  const { auth, refresh } = cookieNames();
+
+  const res = NextResponse.json({ ok: true });
+
+  const opts = {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'lax',
+    path: '/',
+    ...(expires_at ? { expires: new Date(expires_at * 1000) } : {}),
+  };
+
+  res.cookies.set(auth, access_token, opts);
+  res.cookies.set(refresh, refresh_token, opts);
+
+  return res;
 }
+
