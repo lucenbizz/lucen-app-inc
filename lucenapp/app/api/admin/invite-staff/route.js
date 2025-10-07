@@ -1,4 +1,6 @@
 // app/api/admin/invite-staff/route.js
+export const runtime = 'nodejs';
+
 import { NextResponse } from 'next/server';
 import { getUserAndProfile } from '../../../lib/supabaseServerClient'; 
 import { createClient } from '@supabase/supabase-js';

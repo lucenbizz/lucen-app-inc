@@ -1,4 +1,6 @@
-// app/layout.jsx
+
+export const runtime = 'nodejs';
+
 import './globals.css';
 import React from 'react';
 import ServiceWorkerRegister from './components/ServiceWorkerRegister';

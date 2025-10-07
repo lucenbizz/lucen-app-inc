@@ -1,17 +1,16 @@
-# Node / Next
-**/node_modules/
-**/.next/
+# Node/Next
+node_modules/
+.next/
 out/
-dist/
-*.log
+coverage/
 npm-debug.log*
+yarn-debug.log*
 yarn-error.log*
-
-# Env & local
+# Env
 .env
-.env.*
-!.env.example
-.vercel/
-
-# OS/editor
+.env.local
+.env.*.local
+# Misc
 .DS_Store
+*.log
+*.lock-wscript
