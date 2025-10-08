@@ -3,7 +3,7 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 import { NextResponse } from 'next/server';
-import { SUPABASE_URL, SUPABASE_ANON_KEY } from '../../lib/env';
+import { SUPABASE_URL, SUPABASE_ANON_KEY } from '../../../lib/env';
 
 function redact(s, keep = 6) {
   if (!s) return '';
