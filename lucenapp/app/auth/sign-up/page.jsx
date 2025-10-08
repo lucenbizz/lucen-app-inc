@@ -43,7 +43,7 @@ function SignUpForm() {
       const origin =
         typeof window !== 'undefined'
           ? window.location.origin
-          : (process.env.NEXT_PUBLIC_APP_ORIGIN || 'http://localhost:3000');
+          : (process.env.NEXT_PUBLIC_APP_ORIGIN || 'http://lucen-app-inc.vercel.app');
 
       const redirectTo = `${origin}/auth/callback?next=${encodeURIComponent(next)}`;
 
