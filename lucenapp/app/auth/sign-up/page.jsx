@@ -1,8 +1,8 @@
 'use client';
 
-import { Suspense, useEffect, useState } from 'react';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import supabase from '../../lib/supabaseClient';
+import { createClientComponentClient } from '@supabase/auth-helpers-nextjs';
 
 export default function SignUpPage() {
   return (
@@ -17,6 +17,7 @@ function SignUpForm() {
   const sp = useSearchParams();
   const next = sp?.get('next') || '/dashboard';
 
+  const supabase = useMemo(() => createClientComponentClient(), []);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [status, setStatus] = useState('');
@@ -31,7 +32,7 @@ function SignUpForm() {
         router.refresh();
       }
     })();
-  }, [router, next]);
+  }, [router, next, supabase]);
 
   const onSubmit = async (e) => {
     e.preventDefault();
@@ -40,7 +41,10 @@ function SignUpForm() {
 
     try {
       const origin =
-        typeof window !== 'undefined' ? window.location.origin : '';
+        typeof window !== 'undefined'
+          ? window.location.origin
+          : (process.env.NEXT_PUBLIC_APP_ORIGIN || 'http://localhost:3000');
+
       const redirectTo = `${origin}/auth/callback?next=${encodeURIComponent(next)}`;
 
       const { error } = await supabase.auth.signUp({
@@ -51,8 +55,8 @@ function SignUpForm() {
 
       if (error) throw error;
 
-      setStatus('Check your email to confirm your account.');
-      // Optional: route to a “check your email” page
+      setStatus('Check your email to confirm your account. After you click the link, you’ll be signed in automatically.');
+      // If you prefer a dedicated screen:
       // router.replace(`/auth/check-email?email=${encodeURIComponent(email)}`);
     } catch (err) {
       setStatus(err?.message || 'Sign up failed');
@@ -74,7 +78,7 @@ function SignUpForm() {
           placeholder="you@example.com"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
-          className="w-full px-3 py-2 rounded border bg-[#111]"
+          className="w-full px-3 py-2 rounded border bg-[#111] outline-none"
         />
         <input
           type="password"
@@ -82,11 +86,13 @@ function SignUpForm() {
           autoComplete="new-password"
           required
           placeholder="Password"
+          minLength={6}
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          className="w-full px-3 py-2 rounded border bg-[#111]"
+          className="w-full px-3 py-2 rounded border bg-[#111] outline-none"
         />
-        <button className="btn btn-primary w-full" type="submit" disabled={loading}>
+        <button className="w-full rounded-xl border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 px-4 py-2 font-medium transition"
+          type="submit" disabled={loading}>
           {loading ? 'Creating your account…' : 'Sign up'}
         </button>
       </form>
@@ -95,7 +101,8 @@ function SignUpForm() {
 
       <p className="text-sm text-[#9a9a9a] mt-4">
         Already have an account?{' '}
-        <a className="link" href={`/auth/sign-in?next=${encodeURIComponent(next)}`}>
+        <a className="underline decoration-amber-400/70 hover:decoration-amber-300"
+           href={`/sign-in?next=${encodeURIComponent(next)}`}>
           Sign in
         </a>
       </p>
