@@ -1,7 +1,7 @@
 // lib/server/supabase.js
 import { createClient } from '@supabase/supabase-js';
 import { cookies } from 'next/headers';
-import { SUPABASE_URL, SUPABASE_ANON_KEY } from './lib/env';
+import { SUPABASE_URL, SUPABASE_ANON_KEY } from '../../lib/env';
 
 export async function readAuthCookieToken() {
   // cookie name must match your project ref
