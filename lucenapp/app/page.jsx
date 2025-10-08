@@ -1,12 +1,15 @@
-// app/page.jsx
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
-
-import { getUser } from "./lib/supabaseServerClient";
-import { redirect } from "next/navigation";
+// app/page.jsx (server component)
+import { redirect } from 'next/navigation';
+import { cookies } from 'next/headers';
+import { createServerComponentClient } from '@supabase/auth-helpers-nextjs';
 
 export default async function Home() {
-  const { user } = await getUser();
-  if (user) redirect("/dashboard");
-  redirect("/auth/sign-up?next=/dashboard");
+  const supabase = createServerComponentClient({ cookies });
+  const { data: { session } } = await supabase.auth.getSession();
+
+  if (session) {
+    redirect('/dashboard');   // already logged in → go to app
+  } else {
+    redirect('/sign-in');     // default landing for everyone else
+  }
 }
