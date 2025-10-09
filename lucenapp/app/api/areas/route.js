@@ -3,27 +3,9 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 import { NextResponse } from 'next/server';
-import { cookies } from 'next/headers';
 import { createClient } from '@supabase/supabase-js';
 
-/** ===== Helpers ===== */
-function supabaseCookieName() {
-  const ref =
-    (process.env.NEXT_PUBLIC_SUPABASE_URL || '').match(
-      /^https?:\/\/([a-z0-9-]+)\.supabase\.co/i
-    )?.[1] || 'khzbliduummbypuxqnfn';
-  return `sb-${ref}-auth-token`;
-}
-function supabaseWithBearer(token) {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-    {
-      global: { headers: token ? { Authorization: `Bearer ${token}` } : {} },
-      auth: { persistSession: false, autoRefreshToken: false },
-    }
-  );
-}
+/** Simple helpers */
 function jsonError(msg, status = 400) {
   return NextResponse.json({ error: msg }, { status });
 }
@@ -40,16 +22,12 @@ function safeInt(v, dflt, min, max) {
   return Math.min(max, Math.max(min, n));
 }
 
-/** ===== GET /api/areas =====
- * Query params:
- *   - fields=basic|full  (default basic)
- *   - active=true|false|all (default true)
- *   - q=search text (optional)
- *   - limit=1..500 (default 200)
- *
- * Responses:
- *   { items: [{ tag, name }] }              // fields=basic (default)
- *   { items: [{ tag, name, state, center_lat, center_lng, radius_km, active }] } // fields=full
+/** GET /api/areas
+ *  Query:
+ *    - fields=basic|full  (default basic)
+ *    - active=true|false|all (default true)
+ *    - q=search text
+ *    - limit=1..500 (default 200)
  */
 export async function GET(req) {
   try {
@@ -59,15 +37,17 @@ export async function GET(req) {
     const limit = safeInt(searchParams.get('limit'), 200, 1, 500);
     const q = (searchParams.get('q') || '').trim();
 
-    // Require auth (RLS policy is `to authenticated using (true)`)
-    const store = await cookies();
-    const token = store.get(supabaseCookieName())?.value || '';
-    const supabase = supabaseWithBearer(token);
+    const SUPABASE_URL = (process.env.NEXT_PUBLIC_SUPABASE_URL || '').replace(/\/+$/, '');
+    const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+      return jsonError('Server missing Supabase env', 500);
+    }
 
-    const { data: me, error: meErr } = await supabase.auth.getUser();
-    if (meErr || !me?.user?.id) return jsonError('Not signed in', 401);
+    // Plain anon client — no user cookie required
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
 
-    // Columns to fetch
     const fullCols = 'tag, name, state, center_lat, center_lng, radius_km, active';
     const basicCols = 'tag, name';
     const cols = fields === 'full' ? fullCols : basicCols;
@@ -79,29 +59,24 @@ export async function GET(req) {
       .order('name', { ascending: true })
       .limit(limit);
 
-    // Active filter (default true). If active=all → no filter.
     if (activeParam !== 'all') {
       qy = qy.eq('active', toBool(activeParam, true));
     }
 
-    // Simple search over tag/name if provided
     if (q) {
-      // Supabase supports `or()` with ilike on both columns
       qy = qy.or(`tag.ilike.%${q}%,name.ilike.%${q}%`);
     }
 
     const { data, error } = await qy;
     if (error) return jsonError(error.message || 'Failed to load areas', 500);
 
-    // Ensure basic payload shape if fields=basic
-    if (fields !== 'full') {
-      const items = (data || []).map((r) => ({ tag: r.tag, name: r.name }));
-      return NextResponse.json({ items });
+    if (fields === 'full') {
+      return NextResponse.json({ items: data || [] });
     }
-
-    return NextResponse.json({ items: data || [] });
+    return NextResponse.json({
+      items: (data || []).map((r) => ({ tag: r.tag, name: r.name })),
+    });
   } catch (e) {
-    const msg = (e && e.message) || 'Unexpected error';
-    return jsonError(msg, 500);
+    return jsonError((e && e.message) || 'Unexpected error', 500);
   }
 }
