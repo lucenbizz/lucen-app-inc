@@ -1,10 +1,7 @@
-// /app/checkout/page.jsx
 'use client';
-export const dynamic = 'force-dynamic';
 
-import { Suspense } from 'react';
-import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import {
   TIER_RATES_CENTS,
   TIER_ORDER,
@@ -12,57 +9,48 @@ import {
   centsToUSD,
   tierTitle,
   tierFeatures,
-} from "../lib/payout";
+} from '../lib/payout';
 import {
   pointsFor,
   maxRedeemablePoints,
   REDEEM_STEP,
-} from "../lib/loyalty";
+} from '../lib/loyalty';
 
-export default function CheckoutPageWrapper() {
+export default function CheckoutPage() {
   return (
-    <Suspense fallback={<div className="p-6">Loading checkout…</div>}>
-      <CheckoutPageInner />
+    <Suspense fallback={<main className="p-6 max-w-3xl mx-auto">Loading…</main>}>
+      <CheckoutInner />
     </Suspense>
   );
 }
 
-function CheckoutPageInner() {
+function CheckoutInner() {
   const params = useSearchParams();
+  const initialTier = (params.get('tier') || 'bronze').toLowerCase();
+  const [tier, setTier] = useState(TIER_ORDER.includes(initialTier) ? initialTier : 'bronze');
 
-  // Initials via URL (?tier=&slot=&area=)
-  const initialTier = (params.get("tier") || "bronze").toLowerCase();
-  const [tier, setTier] = useState(TIER_ORDER.includes(initialTier) ? initialTier : "bronze");
-
-  // Delivery details
-  const initialSlotIso = params.get("slot") || "";
-  const [slotLocal, setSlotLocal] = useState(isoToLocalInputValue(initialSlotIso)); // datetime-local
-  const [areaTag, setAreaTag] = useState(params.get("area") || "");
-
-  // Shipping/contact (minimal)
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [address1, setAddress1] = useState("");
-  const [city, setCity] = useState("");
-  const [state, setState] = useState("");
-  const [postal, setPostal] = useState("");
-
-  // Pricing + points
+  // Pricing
   const cartTotalCents = TIER_RATES_CENTS[tier];
   const title = tierTitle(tier);
   const features = tierFeatures(tier);
 
+  // Loyalty
   const [balance, setBalance] = useState(0);
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch("/api/loyalty/summary");
+        const res = await fetch('/api/loyalty/summary', { cache: 'no-store' });
+        if (!res.ok) return;
         const json = await res.json();
         setBalance(json?.summary?.points_balance || 0);
       } catch {}
     })();
   }, []);
-  const maxRedeemPts = useMemo(() => maxRedeemablePoints(balance, cartTotalCents), [balance, cartTotalCents]);
+
+  const maxRedeemPts = useMemo(
+    () => maxRedeemablePoints(balance, cartTotalCents),
+    [balance, cartTotalCents]
+  );
   const [redeemPts, setRedeemPts] = useState(0);
 
   // Reservation state
@@ -70,20 +58,92 @@ function CheckoutPageInner() {
   const [reservation, setReservation] = useState(null); // { id, valueCents, expiresAt, pointsReserved }
   const [countdown, setCountdown] = useState(0);
   const [intent, setIntent] = useState(null); // { provider, clientSecret, amountCents, paymentIntentId }
-  const [message, setMessage] = useState("");
 
-  // Availability
-  const [availability, setAvailability] = useState({ checked: false, available: false, loading: false });
+  // === Areas & Slot ===
+  const [areas, setAreas] = useState([]);            // [{tag,name}]
+  const [areaTag, setAreaTag] = useState('');
+  const [slotAt, setSlotAt] = useState('');          // ISO string (UTC), 20-min aligned
+  const [checking, setChecking] = useState(false);
+  const [available, setAvailable] = useState(null);  // null | true | false
+  const [availMsg, setAvailMsg] = useState('');
 
-  // Reserve points when user picks amount
+  // Load active areas (works for signed-out users too if you applied the anon policy)
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await fetch('/api/areas?fields=basic&active=true', { cache: 'no-store' });
+        const j = await r.json();
+        const items = Array.isArray(j.items) ? j.items : [];
+        setAreas(items);
+        if (!areaTag && items.length) setAreaTag(items[0].tag);
+      } catch {}
+    })();
+  }, []); // eslint-disable-line
+
+  // Build a list of the next N slots on 20-minute boundaries (UTC)
+  const slots = useMemo(() => {
+    const out = [];
+    const now = new Date();
+    // align to next 20-min boundary
+    const aligned = new Date(now);
+    aligned.setUTCSeconds(0, 0);
+    const m = aligned.getUTCMinutes();
+    const add = (20 - (m % 20)) % 20;
+    aligned.setUTCMinutes(m + add);
+
+    // generate next 72 slots (~24 hours)
+    for (let i = 0; i < 72; i++) {
+      const d = new Date(aligned.getTime() + i * 20 * 60 * 1000);
+      out.push({
+        iso: d.toISOString(),                 // exact ISO (UTC, :00 seconds)
+        label: humanUTC(d),                   // “Oct 09, 02:20 PM UTC”
+      });
+    }
+    return out;
+  }, []);
+
+  // pick default slot when list loads
+  useEffect(() => {
+    if (!slotAt && slots.length) setSlotAt(slots[0].iso);
+  }, [slots, slotAt]);
+
+  // Probe availability (client-side UX; server will also validate/hard-stop)
+  useEffect(() => {
+    (async () => {
+      if (!areaTag || !slotAt) { setAvailable(null); setAvailMsg(''); return; }
+      setChecking(true); setAvailable(null); setAvailMsg('');
+      try {
+        const r = await fetch('/api/coverage/check', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ area_tag: areaTag, delivery_slot_at: slotAt }),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (r.ok && j?.ok) {
+          setAvailable(true);
+          setAvailMsg(j?.reason === 'approved_request' ? 'Approved request on file.' : 'Coverage looks good.');
+        } else {
+          setAvailable(false);
+          setAvailMsg(j?.error || 'Coverage not available for this area/slot yet.');
+        }
+      } catch {
+        setAvailable(false);
+        setAvailMsg('Coverage check failed.');
+      } finally {
+        setChecking(false);
+      }
+    })();
+  }, [areaTag, slotAt]);
+
+  // === Loyalty reservation ===
   async function reservePoints(points) {
     if (!points) { setReservation(null); setIntent(null); return; }
-    const res = await fetch("/api/loyalty/reserve", {
-      method: "POST", headers: { "Content-Type": "application/json" },
+    const res = await fetch('/api/loyalty/reserve', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ orderTempId, requestedPoints: points, priceCents: cartTotalCents })
     });
     const json = await res.json();
-    if (!res.ok) { alert(json.error || "Reserve failed"); return; }
+    if (!res.ok) { alert(json.error || 'Reserve failed'); return; }
     setReservation({
       id: json.reservationId,
       pointsReserved: json.pointsReserved,
@@ -93,7 +153,7 @@ function CheckoutPageInner() {
     setIntent(null);
   }
 
-  // Expiry countdown
+  // countdown to expiry
   useEffect(() => {
     if (!reservation?.expiresAt) { setCountdown(0); return; }
     const tick = () => {
@@ -105,94 +165,46 @@ function CheckoutPageInner() {
     return () => clearInterval(id);
   }, [reservation?.expiresAt]);
 
-  // Check coverage for areaTag
-  async function checkAvailability(tag) {
-    if (!tag?.trim()) { setAvailability({ checked: true, available: false, loading: false }); return; }
-    setAvailability(a => ({ ...a, loading: true }));
-    try {
-      const res = await fetch(`/api/coverage/check?area=${encodeURIComponent(tag.trim())}`);
-      const json = await res.json();
-      setAvailability({ checked: true, available: !!json.available, loading: false });
-    } catch {
-      setAvailability({ checked: true, available: false, loading: false });
-    }
-  }
-  useEffect(() => {
-    const id = setTimeout(() => checkAvailability(areaTag), 250);
-    return () => clearTimeout(id);
-  }, [areaTag]);
-
-  // Create payment intent (covers reservation + availability)
+  // Create payment intent — NOW sends area_tag + delivery_slot_at
   async function createIntent() {
-    setMessage("");
-    if (!reservation?.id) { alert("Reserve points first (or choose 0 pts)."); return; }
-    if (areaTag && availability.checked && !availability.available) {
-      alert("We don’t have coverage in your area yet. Please submit a request.");
-      return;
-    }
-    const payload = {
-      reservationId: reservation.id,
-      orderTempId,
-      cartTotalCents,
-      tier,
-      area_tag: areaTag || null,
-      slot: localInputToISO(slotLocal),
-      address: { name, email, address1, city, state, postal },
-    };
-    const res = await fetch("/api/payments/intent", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-    const json = await res.json();
-    if (!res.ok) {
-      if (json?.action === "submit_request") {
-        setMessage("No coverage yet. Please submit a delivery request.");
-      } else if (json?.action === "re_reserve") {
-        setMessage("Your reservation expired. Please re-reserve points.");
-      } else {
-        setMessage(json.error || "Failed to create payment intent");
-      }
-      return;
-    }
-    setIntent(json);
-    setMessage("✅ Payment intent created. Continue with payment.");
-  }
+    if (!areaTag) return alert('Choose a service area first.');
+    if (!slotAt) return alert('Choose a delivery time slot first.');
 
-  // Demo helper (only used if provider==='demo')
-  async function simulatePaySuccess() {
-    if (!intent?.paymentIntentId) return alert("Create payment intent first.");
-    const res = await fetch("/api/payments/webhook", {
-      method: "POST", headers: { "Content-Type": "application/json" },
+    const res = await fetch('/api/payments/intent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        provider: "demo",
-        type: "payment.succeeded",
-        payment_intent_id: intent.paymentIntentId,
-        amount_cents: intent.amountCents,
-        purchaseTier: tier,
+        area_tag: areaTag,
+        delivery_slot_at: slotAt,
+        cartTotalCents,
+        reservationId: reservation?.id || null,
+        orderTempId,
       }),
     });
     const json = await res.json();
-    if (!res.ok) return alert(json.error || "Webhook failed");
-    alert("Payment committed. Points redeemed and new points awarded on the net charge.");
+    if (!res.ok) { alert(json.error || 'Failed to create intent'); return; }
+    setIntent(json);
   }
 
-  // Submit delivery request (if no coverage)
-  async function submitDeliveryRequest() {
-    setMessage("");
-    const payload = {
-      tier,
-      delivery_slot_at: localInputToISO(slotLocal),
-      area_tag: areaTag || null,
-      address: { name, email, address1, city, state, postal },
-      notes: "Customer requested coverage via checkout",
-    };
-    const res = await fetch("/api/delivery-requests", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+  // DEMO: simulate payment success (commits reservation via webhook)
+  async function simulatePaySuccess() {
+    if (!intent?.paymentIntentId) return alert('Create payment intent first.');
+    const res = await fetch('/api/payments/webhook', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider: 'demo',
+        type: 'payment.succeeded',
+        payment_intent_id: intent.paymentIntentId,
+        amount_cents: intent.amountCents,
+        purchaseTier: tier,
+        // echo for bookkeeping if you want:
+        area_tag: areaTag,
+        delivery_slot_at: slotAt,
+      }),
     });
     const json = await res.json();
-    if (!res.ok) { setMessage(json.error || "Could not submit request"); return; }
-    setMessage("✅ Request submitted. We’ll notify you once coverage is available.");
+    if (!res.ok) return alert(json.error || 'Webhook failed');
+    alert('Payment committed. Points redeemed and new points awarded on the net charge.');
   }
 
   // UI computations
@@ -204,16 +216,16 @@ function CheckoutPageInner() {
   useEffect(() => { setRedeemPts(0); setReservation(null); setIntent(null); }, [tier]);
 
   return (
-    <main className="p-6 max-w-4xl mx-auto space-y-6">
+    <main className="p-6 max-w-3xl mx-auto space-y-4">
       <h1 className="text-2xl font-bold">Checkout</h1>
 
-      {/* Plan selector */}
-      <section className="border rounded-2xl p-4">
-        <h2 className="font-semibold mb-3">Choose your plan</h2>
-        <div className="grid md:grid-cols-2 gap-3">
+      {/* Tier picker */}
+      <div className="border rounded-2xl p-4">
+        <div className="font-semibold mb-2">Select ebook tier</div>
+        <div className="grid gap-2 sm:grid-cols-2">
           {TIER_ORDER.map((t) => (
             <label key={t}
-              className={`border rounded-xl p-3 flex items-start gap-3 cursor-pointer ${tier===t?"ring-2 ring-black":""}`}>
+              className={`border rounded-xl p-3 flex items-start gap-3 cursor-pointer ${tier===t?'ring-2 ring-black':''}`}>
               <input type="radio" name="tier" checked={tier===t} onChange={()=>setTier(t)} className="mt-1" />
               <div>
                 <div className="font-medium">{TIER_DISPLAY[t].title}</div>
@@ -225,82 +237,53 @@ function CheckoutPageInner() {
             </label>
           ))}
         </div>
-      </section>
+      </div>
 
-      {/* Delivery time + area */}
-      <section className="border rounded-2xl p-4">
-        <h2 className="font-semibold mb-3">Delivery time & area</h2>
-        <div className="grid md:grid-cols-2 gap-3">
-          <label className="text-sm">
-            Delivery slot (20-min steps)
-            <input
-              type="datetime-local"
-              value={slotLocal}
-              onChange={(e) => setSlotLocal(e.target.value)}
-              step={60 * 20}
-              className="block border rounded-xl px-3 py-2 w-full mt-1"
-            />
-          </label>
-          <label className="text-sm">
-            Area tag
-            <input
-              type="text"
+      {/* Area + Slot */}
+      <div className="border rounded-2xl p-4 space-y-3">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="block">
+            <div className="text-sm font-semibold mb-1">Service area</div>
+            <select
               value={areaTag}
-              onChange={(e) => setAreaTag(e.target.value)}
-              placeholder="e.g., queens-astoria"
-              className="block border rounded-xl px-3 py-2 w-full mt-1"
-            />
+              onChange={(e)=>setAreaTag(e.target.value)}
+              className="w-full rounded-xl bg-white border px-3 py-2"
+            >
+              {areas.map(a => (
+                <option key={a.tag} value={a.tag}>{a.name}</option>
+              ))}
+            </select>
           </label>
-        </div>
-        <div className="mt-2 text-sm">
-          {availability.loading && <span className="text-gray-500">Checking availability…</span>}
-          {!availability.loading && availability.checked && areaTag && (
-            availability.available
-              ? <span className="text-green-700">Coverage available in <b>{areaTag}</b>. You can proceed to payment.</span>
-              : <span className="text-amber-700">No active driver/executive in <b>{areaTag}</b> right now.</span>
-          )}
-        </div>
-      </section>
 
-      {/* Contact & address */}
-      <section className="border rounded-2xl p-4">
-        <h2 className="font-semibold mb-3">Contact & delivery address</h2>
-        <div className="grid md:grid-cols-2 gap-3">
-          <label className="text-sm">
-            Full name
-            <input value={name} onChange={(e) => setName(e.target.value)} className="block border rounded-xl px-3 py-2 w-full mt-1" />
-          </label>
-          <label className="text-sm">
-            Email (for receipt)
-            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="block border rounded-xl px-3 py-2 w-full mt-1" />
-          </label>
-          <label className="text-sm md:col-span-2">
-            Address line 1
-            <input value={address1} onChange={(e) => setAddress1(e.target.value)} className="block border rounded-xl px-3 py-2 w-full mt-1" />
-          </label>
-          <label className="text-sm">
-            City
-            <input value={city} onChange={(e) => setCity(e.target.value)} className="block border rounded-xl px-3 py-2 w-full mt-1" />
-          </label>
-          <label className="text-sm">
-            State/Region
-            <input value={state} onChange={(e) => setState(e.target.value)} className="block border rounded-xl px-3 py-2 w-full mt-1" />
-          </label>
-          <label className="text-sm">
-            Postal code
-            <input value={postal} onChange={(e) => setPostal(e.target.value)} className="block border rounded-xl px-3 py-2 w-full mt-1" />
+          <label className="block">
+            <div className="text-sm font-semibold mb-1">Delivery time (20-min slots, UTC)</div>
+            <select
+              value={slotAt}
+              onChange={(e)=>setSlotAt(e.target.value)}
+              className="w-full rounded-xl bg-white border px-3 py-2"
+            >
+              {slots.map(s => (
+                <option key={s.iso} value={s.iso}>{s.label}</option>
+              ))}
+            </select>
           </label>
         </div>
-      </section>
 
-      {/* Loyalty + totals */}
-      <section className="border rounded-2xl p-4 space-y-2">
+        <div className="text-sm">
+          {checking && <span className="text-gray-600">Checking availability…</span>}
+          {!checking && available === true && <span className="text-green-700">✓ {availMsg}</span>}
+          {!checking && available === false && <span className="text-rose-700">✕ {availMsg}</span>}
+        </div>
+      </div>
+
+      {/* Summary + Loyalty */}
+      <div className="border rounded-2xl p-4 space-y-2">
         <div className="flex items-start justify-between">
           <div>
             <div className="font-semibold">{title}</div>
-            <div className="text-sm text-gray-600">{features.join(" • ")}</div>
+            <div className="text-sm text-gray-600">{features.join(' • ')}</div>
             <div className="text-sm text-green-700 mt-1">
-              You’ll earn <strong>{pointsFor(Math.max(0, cartTotalCents - (reservation?.valueCents || 0)), tier)}</strong> points on this purchase.
+              You’ll earn <strong>{willEarn}</strong> points on this purchase.
             </div>
           </div>
           <div className="text-2xl font-bold">${centsToUSD(cartTotalCents)}</div>
@@ -311,12 +294,16 @@ function CheckoutPageInner() {
           <div className="text-sm text-gray-600 mb-2">
             Balance: <strong>{balance.toLocaleString()}</strong> pts • Redeem in {REDEEM_STEP}-pt steps (1,000 pts = $5).
           </div>
-          <RedeemPicker value={redeemPts} onChange={(p)=>{ setRedeemPts(p); reservePoints(p); }} max={maxRedeemPts} />
+          <RedeemPicker
+            value={redeemPts}
+            onChange={(p)=>{ setRedeemPts(p); reservePoints(p); }}
+            max={maxRedeemPts}
+          />
 
           {reservation && (
             <div className="mt-2 text-sm flex items-center gap-3">
               <span className="px-2 py-1 border rounded-xl bg-gray-50">
-                Reserved: {reservation.pointsReserved.toLocaleString()} pts (−${centsToUSD(reservation.valueCents)})
+                Reserved: {reservation.pointsReserved.toLocaleString()} pts (−${centsToUSD(discountCents)})
               </span>
               <span className="text-gray-600">Expires in {countdown}s</span>
               {countdown === 0 && (
@@ -326,34 +313,22 @@ function CheckoutPageInner() {
           )}
 
           <div className="flex items-center justify-end gap-4 pt-2">
-            <div className="text-sm">Discount: <strong>${centsToUSD(reservation?.valueCents || 0)}</strong></div>
+            <div className="text-sm">Discount: <strong>${centsToUSD(discountCents)}</strong></div>
             <div className="text-xl font-bold">Total: ${centsToUSD(totalCents)}</div>
           </div>
         </div>
-      </section>
+      </div>
 
       {/* Actions */}
-      <div className="flex items-center justify-between">
-        <div className={`text-sm ${message.startsWith("✅") ? "text-green-700" : "text-amber-700"}`}>{message}</div>
-        <div className="flex gap-2">
-          <button
-            onClick={createIntent}
-            disabled={(areaTag && availability.checked && !availability.available)}
-            className="border rounded-xl px-4 py-2 hover:shadow disabled:opacity-50"
-          >
-            Create Payment Intent
+      <div className="flex items-center justify-end gap-2">
+        <button onClick={createIntent} className="border rounded-xl px-4 py-2 hover:shadow">
+          Create Payment Intent
+        </button>
+        {intent?.provider === 'demo' && (
+          <button onClick={simulatePaySuccess} className="border rounded-xl px-4 py-2 hover:shadow">
+            DEMO: Simulate Paid
           </button>
-          {(intent?.provider === "demo") && (
-            <button onClick={simulatePaySuccess} className="border rounded-xl px-4 py-2 hover:shadow">
-              DEMO: Simulate Paid
-            </button>
-          )}
-          {(areaTag && availability.checked && !availability.available) && (
-            <button onClick={submitDeliveryRequest} className="border rounded-xl px-4 py-2 hover:shadow">
-              Submit request for delivery
-            </button>
-          )}
-        </div>
+        )}
       </div>
     </main>
   );
@@ -378,20 +353,19 @@ function RedeemPicker({ value, onChange, max }) {
   );
 }
 
-function isoToLocalInputValue(iso) {
-  if (!iso) return "";
-  const d = new Date(iso);
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-function localInputToISO(local) {
-  if (!local) return null;
-  return new Date(local).toISOString();
-}
 function cryptoRandomId() {
-  if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
     const a = new Uint32Array(4); crypto.getRandomValues(a);
-    return [...a].map(x=>x.toString(16).padStart(8,"0")).join("");
+    return [...a].map(x=>x.toString(16).padStart(8,'0')).join('');
   }
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+function humanUTC(d) {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC',
+    year: 'numeric', month: 'short', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: true,
+  });
+  return `${fmt.format(d)} UTC`;
 }
