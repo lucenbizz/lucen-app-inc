@@ -5,7 +5,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
-/** Simple helpers */
+/** Helpers */
 function jsonError(msg, status = 400) {
   return NextResponse.json({ error: msg }, { status });
 }
@@ -23,11 +23,15 @@ function safeInt(v, dflt, min, max) {
 }
 
 /** GET /api/areas
- *  Query:
- *    - fields=basic|full  (default basic)
- *    - active=true|false|all (default true)
- *    - q=search text
- *    - limit=1..500 (default 200)
+ * Query:
+ *   - fields=basic|full   (default basic)
+ *   - active=true|false|all (default true)
+ *   - q=search text       (optional)
+ *   - limit=1..500        (default 200)
+ *
+ * Responses:
+ *   { items: [{ tag, name }] }                       // fields=basic
+ *   { items: [{ tag, name, state, center_lat, center_lng, radius_km, active }] } // fields=full
  */
 export async function GET(req) {
   try {
@@ -43,7 +47,7 @@ export async function GET(req) {
       return jsonError('Server missing Supabase env', 500);
     }
 
-    // Plain anon client — no user cookie required
+    // Plain anon client — relies on RLS to allow anon+authenticated SELECT active=true
     const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
