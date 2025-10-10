@@ -1,23 +1,20 @@
-// app/admin/layout.jsx
+// app/admin/layout.jsx (server component)
 import { redirect } from 'next/navigation';
-import { getSupabaseServer } from '../lib/supabaseServerClient';
-
-export const metadata = { title: 'Admin — Lucen' };
+import { cookies } from 'next/headers';
+import { createServerComponentClient } from '@supabase/auth-helpers-nextjs';
 
 export default async function AdminLayout({ children }) {
-  const supabase = getSupabaseServer();
+  const supabase = createServerComponentClient({ cookies });
   const { data: { user } } = await supabase.auth.getUser();
-  if (!user) redirect('/auth/sign-in?next=/admin');
+  if (!user) redirect('/sign-in');
 
   const { data: prof } = await supabase
     .from('profiles')
-    .select('role')
-    .eq('id', user.id)
-    .single();
+    .select('is_admin')
+    .eq('id', user.id)   // or .eq('user_id', user.id) depending on schema
+    .maybeSingle();
 
-  if (!prof || prof.role !== 'admin') {
-    redirect('/forbidden');
-  }
+  if (!prof?.is_admin) redirect('/'); // or show 403
 
-  return <section className="min-h-screen">{children}</section>;
+  return <>{children}</>;
 }
