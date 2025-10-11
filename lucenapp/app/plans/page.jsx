@@ -1,21 +1,13 @@
+// app/plans/page.jsx
 'use client';
 
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { createClientComponentClient } from '@supabase/auth-helpers-nextjs';
 import {
-  TIER_RATES_CENTS,
-  TIER_ORDER,
-  TIER_DISPLAY,
-  centsToUSD,
-  tierTitle,
-  tierFeatures,
+  TIER_RATES_CENTS, TIER_ORDER, TIER_DISPLAY,
+  centsToUSD, tierTitle, tierFeatures,
 } from '../lib/payout';
-import {
-  pointsFor,
-  maxRedeemablePoints,
-  REDEEM_STEP,
-} from '../lib/loyalty';
+import { pointsFor, maxRedeemablePoints, REDEEM_STEP } from '../lib/loyalty';
 
 export default function PlansPage() {
   return (
@@ -27,48 +19,34 @@ export default function PlansPage() {
 
 function PlansInner() {
   const router = useRouter();
-  const supabase = useMemo(() => createClientComponentClient(), []);
   const params = useSearchParams();
   const initialTier = (params.get('tier') || 'bronze').toLowerCase();
 
-  // Auth presence (for nice redirect instead of API 401)
-  const [authed, setAuthed] = useState(false);
-  useEffect(() => {
-    (async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      setAuthed(!!user);
-    })();
-  }, [supabase]);
-
-  // Price & copy
   const [tier, setTier] = useState(TIER_ORDER.includes(initialTier) ? initialTier : 'bronze');
   const cartTotalCents = TIER_RATES_CENTS[tier];
   const title = tierTitle(tier);
   const features = tierFeatures(tier);
 
-  // Loyalty (optional)
+  // Loyalty (ok if 401; we just show 0)
   const [balance, setBalance] = useState(0);
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch('/api/loyalty/summary', { cache: 'no-store' });
-        if (!res.ok) return;
-        const json = await res.json();
-        setBalance(json?.summary?.points_balance || 0);
+        const r = await fetch('/api/loyalty/summary', { cache: 'no-store' });
+        if (!r.ok) return;
+        const j = await r.json();
+        setBalance(j?.summary?.points_balance || 0);
       } catch {}
     })();
   }, []);
-  const maxRedeemPts = useMemo(
-    () => maxRedeemablePoints(balance, cartTotalCents),
-    [balance, cartTotalCents]
-  );
+  const maxRedeemPts = useMemo(() => maxRedeemablePoints(balance, cartTotalCents), [balance, cartTotalCents]);
   const [redeemPts, setRedeemPts] = useState(0);
-  const [reservation, setReservation] = useState(null); // {id, valueCents, expiresAt, pointsReserved}
+  const [reservation, setReservation] = useState(null);
   const [countdown, setCountdown] = useState(0);
   const [orderTempId] = useState(() => cryptoRandomId());
 
   // Areas
-  const [areas, setAreas] = useState([]);  // [{tag,name}]
+  const [areas, setAreas] = useState([]);
   const [areaTag, setAreaTag] = useState('');
   useEffect(() => {
     (async () => {
@@ -82,13 +60,12 @@ function PlansInner() {
     })();
   }, []); // eslint-disable-line
 
-  // Day dropdown: today → +6 days (7 total)
+  // Day dropdown: today → +6 days
   const days = useMemo(() => {
     const out = [];
-    const now = new Date();
-    now.setHours(0, 0, 0, 0);
-    for (let i = 0; i < 7; i++) {
-      const d = new Date(now.getTime() + i * 24 * 60 * 60 * 1000);
+    const base = new Date(); base.setHours(0,0,0,0);
+    for (let i=0;i<7;i++){
+      const d = new Date(base.getTime() + i*86400000);
       out.push({ key: ymd(d), label: humanDay(d) });
     }
     return out;
@@ -96,15 +73,12 @@ function PlansInner() {
   const [dayKey, setDayKey] = useState('');
   useEffect(() => { if (!dayKey && days.length) setDayKey(days[0].key); }, [days, dayKey]);
 
-  // Time dropdown: 20-min increments across the day (00:00 → 23:40 local time)
+  // Time dropdown: every 20 min
   const timeOptions = useMemo(() => {
     const out = [];
-    for (let h = 0; h < 24; h++) {
-      for (let m = 0; m < 60; m += 20) {
-        out.push({
-          key: `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`, // "HH:MM"
-          label: humanLocalTime(h, m),
-        });
+    for (let h=0;h<24;h++){
+      for (let m=0;m<60;m+=20){
+        out.push({ key: `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`, label: humanLocalTime(h,m) });
       }
     }
     return out;
@@ -112,20 +86,18 @@ function PlansInner() {
   const [timeKey, setTimeKey] = useState('');
   useEffect(() => { if (!timeKey && timeOptions.length) setTimeKey(timeOptions[0].key); }, [timeOptions, timeKey]);
 
-  // Combine day + time → ISO (UTC), aligned to :00 and 20-min boundary
+  // Combine to ISO (UTC) aligned to :00 on a 20-min boundary
   const slotAt = useMemo(() => {
     if (!dayKey || !timeKey) return '';
-    const [h, m] = timeKey.split(':').map((n) => parseInt(n, 10));
-    const d = parseYMD(dayKey);
-    d.setHours(h, m, 0, 0);           // local time
-    // ensure 20-min boundary
-    if (d.getMinutes() % 20 !== 0) d.setMinutes(d.getMinutes() - (d.getMinutes() % 20));
-    return d.toISOString();           // send ISO (UTC) to server
+    const [h,m] = timeKey.split(':').map(n=>parseInt(n,10));
+    const d = parseYMD(dayKey); d.setHours(h,m,0,0);
+    if (d.getMinutes() % 20 !== 0) d.setMinutes(d.getMinutes() - (d.getMinutes()%20));
+    return d.toISOString();
   }, [dayKey, timeKey]);
 
-  // Availability probe (UX only)
+  // Availability probe (open to public; server hard-gates again)
   const [checking, setChecking] = useState(false);
-  const [available, setAvailable] = useState(null);  // null | true | false
+  const [available, setAvailable] = useState(null);
   const [availMsg, setAvailMsg] = useState('');
   useEffect(() => {
     (async () => {
@@ -133,55 +105,41 @@ function PlansInner() {
       setChecking(true); setAvailable(null); setAvailMsg('');
       try {
         const r = await fetch('/api/coverage/check', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ area_tag: areaTag, delivery_slot_at: slotAt }),
         });
-        const j = await r.json().catch(() => ({}));
-        if (r.ok && j?.ok) { setAvailable(true); setAvailMsg(j?.reason === 'approved_request' ? 'Approved request on file.' : 'Coverage looks good.'); }
-        else { setAvailable(false); setAvailMsg(j?.error || 'Coverage not available for this area/slot yet.'); }
+        const j = await r.json().catch(()=>({}));
+        if (r.ok && j?.ok) { setAvailable(true); setAvailMsg(j?.reason || 'Coverage looks good.'); }
+        else { setAvailable(false); setAvailMsg(j?.error || 'Coverage not available.'); }
       } catch { setAvailable(false); setAvailMsg('Coverage check failed.'); }
       finally { setChecking(false); }
     })();
   }, [areaTag, slotAt]);
 
-  // Reserve loyalty points
-  async function reservePoints(points) {
+  // Reserve points
+  async function reservePoints(points){
     if (!points) { setReservation(null); return; }
-    const res = await fetch('/api/loyalty/reserve', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+    const r = await fetch('/api/loyalty/reserve', {
+      method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ orderTempId, requestedPoints: points, priceCents: cartTotalCents })
     });
-    const json = await res.json();
-    if (!res.ok) { alert(json.error || 'Reserve failed'); return; }
-    setReservation({
-      id: json.reservationId,
-      pointsReserved: json.pointsReserved,
-      valueCents: json.valueCents,
-      expiresAt: json.expiresAt,
-    });
+    const j = await r.json();
+    if (!r.ok) { alert(j.error || 'Reserve failed'); return; }
+    setReservation({ id: j.reservationId, pointsReserved: j.pointsReserved, valueCents: j.valueCents, expiresAt: j.expiresAt });
   }
-  // countdown
   useEffect(() => {
     if (!reservation?.expiresAt) { setCountdown(0); return; }
     const tick = () => {
       const ms = new Date(reservation.expiresAt).getTime() - Date.now();
-      setCountdown(Math.max(0, Math.ceil(ms / 1000)));
+      setCountdown(Math.max(0, Math.ceil(ms/1000)));
     };
     tick();
-    const id = setInterval(tick, 1000);
-    return () => clearInterval(id);
+    const id = setInterval(tick, 1000); return () => clearInterval(id);
   }, [reservation?.expiresAt]);
 
-  // Payment intent (nice redirect if not signed in)
+  // Create intent — try, and if 401, redirect to sign-in and come back
   const [intent, setIntent] = useState(null);
-  async function createIntent() {
-    if (!authed) {
-      // send them to sign-in and come back
-      const next = `/plans?tier=${encodeURIComponent(tier)}`;
-      router.push(`/sign-in?next=${encodeURIComponent(next)}`);
-      return;
-    }
+  async function createIntent(){
     if (!areaTag) return alert('Choose a service area first.');
     if (!slotAt)  return alert('Choose a delivery time slot first.');
 
@@ -194,23 +152,27 @@ function PlansInner() {
     };
 
     const res = await fetch('/api/payments/intent', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
     });
-    const json = await res.json();
+
+    if (res.status === 401) {
+      const next = `/plans?tier=${encodeURIComponent(tier)}`;
+      router.push(`/sign-in?next=${encodeURIComponent(next)}`);
+      return;
+    }
+
+    const json = await res.json().catch(()=>({}));
     if (!res.ok) { alert(json.error || 'Failed to create intent'); return; }
     setIntent(json);
-    // TODO: hand off to PSP or navigate to checkout/thank-you
-    // router.push(`/checkout/thank-you?order=${json.paymentIntentId}`);
   }
 
-  // UI totals
+  // totals
   const discountCents = reservation?.valueCents || 0;
   const totalCents = Math.max(0, cartTotalCents - discountCents);
   const willEarn = pointsFor(totalCents, tier);
 
-  // Reset when tier changes
+  // reset on tier change
   useEffect(() => { setRedeemPts(0); setReservation(null); setIntent(null); }, [tier]);
 
   return (
@@ -244,15 +206,13 @@ function PlansInner() {
               {areas.map(a => <option key={a.tag} value={a.tag}>{a.name}</option>)}
             </select>
           </label>
-
           <label className="block">
-            <div className="text-sm font-semibold mb-1 text-amber-200">Day</div>
+            <div className="text-sm font-semibold mb-1 text-amber-2 00">Day</div>
             <select value={dayKey} onChange={(e)=>setDayKey(e.target.value)}
               className="w-full rounded-xl bg-black/40 border border-amber-500/40 px-3 py-2 outline-none">
               {days.map(d => <option key={d.key} value={d.key}>{d.label}</option>)}
             </select>
           </label>
-
           <label className="block">
             <div className="text-sm font-semibold mb-1 text-amber-200">Time (20-min)</div>
             <select value={timeKey} onChange={(e)=>setTimeKey(e.target.value)}
@@ -261,11 +221,9 @@ function PlansInner() {
             </select>
           </label>
         </div>
-
         <div className="text-xs text-amber-200/70">
           Selected: area=<code className="text-amber-300">{areaTag || '—'}</code>, slot=<code className="text-amber-300">{slotAt || '—'}</code>
         </div>
-
         <div className="text-sm">
           {checking && <span className="text-amber-300/80">Checking availability…</span>}
           {!checking && available === true && <span className="text-emerald-300">✓ {availMsg}</span>}
@@ -326,65 +284,29 @@ function PlansInner() {
   );
 }
 
-/* ---------- Small UI bits ---------- */
+/* ---- helpers ---- */
 function RedeemPicker({ value, onChange, max }) {
-  const steps = [];
-  for (let p = 0; p <= max; p += REDEEM_STEP) steps.push(p);
+  const steps = []; for (let p=0; p<=max; p+=REDEEM_STEP) steps.push(p);
   return (
     <div className="flex items-center gap-2 flex-wrap">
-      {steps.map((p) => (
-        <button
-          key={p}
-          onClick={() => onChange(p)}
-          className={`text-sm border border-amber-500/40 rounded-xl px-3 py-1 ${value===p?'bg-amber-500 text-black':'bg-black/40 hover:bg-black/60 text-amber-100'}`}
-        >
+      {steps.map(p => (
+        <button key={p} onClick={()=>onChange(p)}
+          className={`text-sm border border-amber-500/40 rounded-xl px-3 py-1 ${value===p?'bg-amber-500 text-black':'bg-black/40 hover:bg-black/60 text-amber-100'}`}>
           {p.toLocaleString()} pts
         </button>
       ))}
-      {max === 0 && <span className="text-xs text-amber-300/70">No redeemable points for this cart.</span>}
+      {max===0 && <span className="text-xs text-amber-300/70">No redeemable points for this cart.</span>}
     </div>
   );
 }
 function CountdownBadge({ seconds, onRefresh }) {
   if (!seconds) {
-    return (
-      <button className="text-xs border border-amber-500/40 rounded-xl px-2 py-1 bg-black/40"
-        onClick={onRefresh}>
-        Re-reserve
-      </button>
-    );
+    return <button className="text-xs border border-amber-500/40 rounded-xl px-2 py-1 bg-black/40" onClick={onRefresh}>Re-reserve</button>;
   }
   return <span className="text-amber-200/80">Expires in {seconds}s</span>;
 }
-
-/* ---------- Date/time helpers ---------- */
-function ymd(d) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-function parseYMD(s) {
-  const [y, m, d] = s.split('-').map((n) => parseInt(n, 10));
-  return new Date(y, m - 1, d, 0, 0, 0, 0);
-}
-function humanDay(d) {
-  const fmt = new Intl.DateTimeFormat('en-US', {
-    weekday: 'short', month: 'short', day: '2-digit',
-  });
-  return fmt.format(d);
-}
-function humanLocalTime(h, m) {
-  const d = new Date();
-  d.setHours(h, m, 0, 0);
-  return new Intl.DateTimeFormat('en-US', {
-    hour: '2-digit', minute: '2-digit', hour12: true
-  }).format(d);
-}
-function cryptoRandomId() {
-  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-    const a = new Uint32Array(4); crypto.getRandomValues(a);
-    return [...a].map(x=>x.toString(16).padStart(8,'0')).join('');
-  }
-  return Math.random().toString(36).slice(2) + Date.now().toString(36);
-}
+function ymd(d){ const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,'0'); const day=String(d.getDate()).padStart(2,'0'); return `${y}-${m}-${day}`; }
+function parseYMD(s){ const [y,m,d]=s.split('-').map(n=>parseInt(n,10)); return new Date(y,m-1,d,0,0,0,0); }
+function humanDay(d){ return new Intl.DateTimeFormat('en-US',{weekday:'short',month:'short',day:'2-digit'}).format(d); }
+function humanLocalTime(h,m){ const d=new Date(); d.setHours(h,m,0,0); return new Intl.DateTimeFormat('en-US',{hour:'2-digit',minute:'2-digit',hour12:true}).format(d); }
+function cryptoRandomId(){ if (typeof crypto!=='undefined' && crypto.getRandomValues){ const a=new Uint32Array(4); crypto.getRandomValues(a); return [...a].map(x=>x.toString(16).padStart(8,'0')).join(''); } return Math.random().toString(36).slice(2)+Date.now().toString(36); }
