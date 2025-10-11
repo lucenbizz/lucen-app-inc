@@ -1,4 +1,3 @@
-// app/plans/page.jsx
 'use client';
 
 import { Suspense, useEffect, useMemo, useState } from 'react';
@@ -22,6 +21,7 @@ function PlansInner() {
   const params = useSearchParams();
   const initialTier = (params.get('tier') || 'bronze').toLowerCase();
 
+  // Tier/pricing
   const [tier, setTier] = useState(TIER_ORDER.includes(initialTier) ? initialTier : 'bronze');
   const cartTotalCents = TIER_RATES_CENTS[tier];
   const title = tierTitle(tier);
@@ -41,12 +41,12 @@ function PlansInner() {
   }, []);
   const maxRedeemPts = useMemo(() => maxRedeemablePoints(balance, cartTotalCents), [balance, cartTotalCents]);
   const [redeemPts, setRedeemPts] = useState(0);
-  const [reservation, setReservation] = useState(null);
+  const [reservation, setReservation] = useState(null); // {id, pointsReserved, valueCents, expiresAt}
   const [countdown, setCountdown] = useState(0);
   const [orderTempId] = useState(() => cryptoRandomId());
 
   // Areas
-  const [areas, setAreas] = useState([]);
+  const [areas, setAreas] = useState([]);          // [{tag,name}]
   const [areaTag, setAreaTag] = useState('');
   useEffect(() => {
     (async () => {
@@ -90,12 +90,12 @@ function PlansInner() {
   const slotAt = useMemo(() => {
     if (!dayKey || !timeKey) return '';
     const [h,m] = timeKey.split(':').map(n=>parseInt(n,10));
-    const d = parseYMD(dayKey); d.setHours(h,m,0,0);
+    const d = parseYMD(dayKey); d.setHours(h,m,0,0);                 // local time chosen
     if (d.getMinutes() % 20 !== 0) d.setMinutes(d.getMinutes() - (d.getMinutes()%20));
-    return d.toISOString();
+    return d.toISOString();                                          // send ISO (UTC)
   }, [dayKey, timeKey]);
 
-  // Availability probe (open to public; server hard-gates again)
+  // Availability probe (open; server hard-gates again in /api/payments/intent)
   const [checking, setChecking] = useState(false);
   const [available, setAvailable] = useState(null);
   const [availMsg, setAvailMsg] = useState('');
@@ -105,7 +105,7 @@ function PlansInner() {
       setChecking(true); setAvailable(null); setAvailMsg('');
       try {
         const r = await fetch('/api/coverage/check', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { 'Content-Type':'application/json' },
           body: JSON.stringify({ area_tag: areaTag, delivery_slot_at: slotAt }),
         });
         const j = await r.json().catch(()=>({}));
@@ -127,6 +127,7 @@ function PlansInner() {
     if (!r.ok) { alert(j.error || 'Reserve failed'); return; }
     setReservation({ id: j.reservationId, pointsReserved: j.pointsReserved, valueCents: j.valueCents, expiresAt: j.expiresAt });
   }
+  // countdown
   useEffect(() => {
     if (!reservation?.expiresAt) { setCountdown(0); return; }
     const tick = () => {
@@ -137,7 +138,7 @@ function PlansInner() {
     const id = setInterval(tick, 1000); return () => clearInterval(id);
   }, [reservation?.expiresAt]);
 
-  // Create intent — try, and if 401, redirect to sign-in and come back
+  // Create intent — try, if 401 redirect to sign-in; on success go to /checkout
   const [intent, setIntent] = useState(null);
   async function createIntent(){
     if (!areaTag) return alert('Choose a service area first.');
@@ -165,14 +166,29 @@ function PlansInner() {
     const json = await res.json().catch(()=>({}));
     if (!res.ok) { alert(json.error || 'Failed to create intent'); return; }
     setIntent(json);
+
+    // Stash clientSecret so checkout can pick it up immediately (optional)
+    try {
+      if (json?.clientSecret) localStorage.setItem('lastClientSecret', json.clientSecret);
+    } catch {}
+
+    // Navigate to checkout with context
+    const url = new URL('/checkout', window.location.origin);
+    url.searchParams.set('tier', tier);
+    url.searchParams.set('area', areaTag);
+    url.searchParams.set('slot', slotAt);                // ISO
+    url.searchParams.set('pi', json.paymentIntentId);    // demo id
+    if (reservation?.id) url.searchParams.set('rsv', reservation.id);
+
+    router.push(url.pathname + url.search);
   }
 
-  // totals
+  // UI totals
   const discountCents = reservation?.valueCents || 0;
   const totalCents = Math.max(0, cartTotalCents - discountCents);
   const willEarn = pointsFor(totalCents, tier);
 
-  // reset on tier change
+  // Reset when tier changes
   useEffect(() => { setRedeemPts(0); setReservation(null); setIntent(null); }, [tier]);
 
   return (
@@ -207,7 +223,7 @@ function PlansInner() {
             </select>
           </label>
           <label className="block">
-            <div className="text-sm font-semibold mb-1 text-amber-2 00">Day</div>
+            <div className="text-sm font-semibold mb-1 text-amber-200">Day</div>
             <select value={dayKey} onChange={(e)=>setDayKey(e.target.value)}
               className="w-full rounded-xl bg-black/40 border border-amber-500/40 px-3 py-2 outline-none">
               {days.map(d => <option key={d.key} value={d.key}>{d.label}</option>)}
@@ -221,6 +237,7 @@ function PlansInner() {
             </select>
           </label>
         </div>
+
         <div className="text-xs text-amber-200/70">
           Selected: area=<code className="text-amber-300">{areaTag || '—'}</code>, slot=<code className="text-amber-300">{slotAt || '—'}</code>
         </div>
