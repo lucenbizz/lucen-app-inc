@@ -59,15 +59,13 @@ function CheckoutInner() {
   const [countdown, setCountdown] = useState(0);
   const [intent, setIntent] = useState(null); // { provider, clientSecret, amountCents, paymentIntentId }
 
-  // === Areas & Slot ===
+  // === Areas & Slot (prefill from querystring if present) ===
   const [areas, setAreas] = useState([]);            // [{tag,name}]
   const [areaTag, setAreaTag] = useState('');
-  const [slotAt, setSlotAt] = useState('');          // ISO string (UTC), 20-min aligned
-  const [checking, setChecking] = useState(false);
-  const [available, setAvailable] = useState(null);  // null | true | false
-  const [availMsg, setAvailMsg] = useState('');
+  const [slotAt, setSlotAt] = useState('');
+  const piFromQuery = params.get('pi') || '';
 
-  // Load active areas (works for signed-out users too if you applied the anon policy)
+  // Load active areas (works for signed-out users too if anon policy is set)
   useEffect(() => {
     (async () => {
       try {
@@ -75,65 +73,53 @@ function CheckoutInner() {
         const j = await r.json();
         const items = Array.isArray(j.items) ? j.items : [];
         setAreas(items);
-        if (!areaTag && items.length) setAreaTag(items[0].tag);
+        // Prefill from URL first; otherwise default to first area
+        const areaParam = params.get('area');
+        if (areaParam) setAreaTag(areaParam);
+        else if (items.length) setAreaTag(items[0].tag);
       } catch {}
     })();
-  }, []); // eslint-disable-line
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Prefill the slot/tier/intent from query + localStorage
+  useEffect(() => {
+    const urlTier = (params.get('tier') || '').toLowerCase();
+    if (urlTier && TIER_ORDER.includes(urlTier)) setTier(urlTier);
+
+    const slotParam = params.get('slot');
+    if (slotParam) setSlotAt(slotParam);
+
+    // If plans created the intent, pick up the clientSecret so we can render immediately
+    try {
+      const cs = localStorage.getItem('lastClientSecret');
+      if (cs && piFromQuery) {
+        setIntent({ provider: 'demo', clientSecret: cs, paymentIntentId: piFromQuery, amountCents: TIER_RATES_CENTS[urlTier || 'bronze'] });
+      }
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Build a list of the next N slots on 20-minute boundaries (UTC)
   const slots = useMemo(() => {
     const out = [];
     const now = new Date();
-    // align to next 20-min boundary
     const aligned = new Date(now);
     aligned.setUTCSeconds(0, 0);
     const m = aligned.getUTCMinutes();
     const add = (20 - (m % 20)) % 20;
     aligned.setUTCMinutes(m + add);
-
-    // generate next 72 slots (~24 hours)
     for (let i = 0; i < 72; i++) {
       const d = new Date(aligned.getTime() + i * 20 * 60 * 1000);
-      out.push({
-        iso: d.toISOString(),                 // exact ISO (UTC, :00 seconds)
-        label: humanUTC(d),                   // “Oct 09, 02:20 PM UTC”
-      });
+      out.push({ iso: d.toISOString(), label: humanUTC(d) });
     }
     return out;
   }, []);
 
-  // pick default slot when list loads
+  // If no slot from URL, default to first
   useEffect(() => {
     if (!slotAt && slots.length) setSlotAt(slots[0].iso);
   }, [slots, slotAt]);
-
-  // Probe availability (client-side UX; server will also validate/hard-stop)
-  useEffect(() => {
-    (async () => {
-      if (!areaTag || !slotAt) { setAvailable(null); setAvailMsg(''); return; }
-      setChecking(true); setAvailable(null); setAvailMsg('');
-      try {
-        const r = await fetch('/api/coverage/check', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ area_tag: areaTag, delivery_slot_at: slotAt }),
-        });
-        const j = await r.json().catch(() => ({}));
-        if (r.ok && j?.ok) {
-          setAvailable(true);
-          setAvailMsg(j?.reason === 'approved_request' ? 'Approved request on file.' : 'Coverage looks good.');
-        } else {
-          setAvailable(false);
-          setAvailMsg(j?.error || 'Coverage not available for this area/slot yet.');
-        }
-      } catch {
-        setAvailable(false);
-        setAvailMsg('Coverage check failed.');
-      } finally {
-        setChecking(false);
-      }
-    })();
-  }, [areaTag, slotAt]);
 
   // === Loyalty reservation ===
   async function reservePoints(points) {
@@ -165,25 +151,29 @@ function CheckoutInner() {
     return () => clearInterval(id);
   }, [reservation?.expiresAt]);
 
-  // Create payment intent — NOW sends area_tag + delivery_slot_at
+  // Create payment intent (uses reservation's discount)
   async function createIntent() {
     if (!areaTag) return alert('Choose a service area first.');
     if (!slotAt) return alert('Choose a delivery time slot first.');
 
     const res = await fetch('/api/payments/intent', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         area_tag: areaTag,
         delivery_slot_at: slotAt,
         cartTotalCents,
         reservationId: reservation?.id || null,
         orderTempId,
-      }),
+      })
     });
     const json = await res.json();
     if (!res.ok) { alert(json.error || 'Failed to create intent'); return; }
     setIntent(json);
+
+    // Store client secret for refresh-safe payment element
+    try {
+      if (json?.clientSecret) localStorage.setItem('lastClientSecret', json.clientSecret);
+    } catch {}
   }
 
   // DEMO: simulate payment success (commits reservation via webhook)
@@ -195,9 +185,8 @@ function CheckoutInner() {
         provider: 'demo',
         type: 'payment.succeeded',
         payment_intent_id: intent.paymentIntentId,
-        amount_cents: intent.amountCents,
+        amount_cents: intent.amountCents || cartTotalCents,
         purchaseTier: tier,
-        // echo for bookkeeping if you want:
         area_tag: areaTag,
         delivery_slot_at: slotAt,
       }),
@@ -213,7 +202,7 @@ function CheckoutInner() {
   const willEarn = pointsFor(totalCents, tier);
 
   // Reset when tier changes
-  useEffect(() => { setRedeemPts(0); setReservation(null); setIntent(null); }, [tier]);
+  useEffect(() => { setRedeemPts(0); setReservation(null); /* keep intent if prefilled */ }, [tier]);
 
   return (
     <main className="p-6 max-w-3xl mx-auto space-y-4">
@@ -269,10 +258,8 @@ function CheckoutInner() {
           </label>
         </div>
 
-        <div className="text-sm">
-          {checking && <span className="text-gray-600">Checking availability…</span>}
-          {!checking && available === true && <span className="text-green-700">✓ {availMsg}</span>}
-          {!checking && available === false && <span className="text-rose-700">✕ {availMsg}</span>}
+        <div className="text-xs text-gray-600">
+          Selected: area=<code>{areaTag || '—'}</code>, slot=<code>{slotAt || '—'}</code>
         </div>
       </div>
 
@@ -321,9 +308,11 @@ function CheckoutInner() {
 
       {/* Actions */}
       <div className="flex items-center justify-end gap-2">
-        <button onClick={createIntent} className="border rounded-xl px-4 py-2 hover:shadow">
-          Create Payment Intent
-        </button>
+        {!intent?.paymentIntentId && (
+          <button onClick={createIntent} className="border rounded-xl px-4 py-2 hover:shadow">
+            Create Payment Intent
+          </button>
+        )}
         {intent?.provider === 'demo' && (
           <button onClick={simulatePaySuccess} className="border rounded-xl px-4 py-2 hover:shadow">
             DEMO: Simulate Paid
@@ -360,7 +349,6 @@ function cryptoRandomId() {
   }
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
-
 function humanUTC(d) {
   const fmt = new Intl.DateTimeFormat('en-US', {
     timeZone: 'UTC',
