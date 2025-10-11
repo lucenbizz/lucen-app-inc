@@ -3,48 +3,38 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 import { NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
 
 function jsonError(msg, status = 400) {
-  return NextResponse.json({ error: msg }, { status });
-}
-
-function isIsoDate(s) {
-  if (!s || typeof s !== 'string') return false;
-  const d = new Date(s);
-  return !Number.isNaN(d.getTime());
-}
-function enforce20MinIncrement(iso) {
-  const d = new Date(iso);
-  return d.getUTCMinutes() % 20 === 0 && d.getUTCSeconds() === 0 && d.getUTCMilliseconds() === 0;
+  return NextResponse.json({ ok: false, error: msg }, { status });
 }
 
 export async function POST(req) {
   try {
-    const body = await req.json().catch(() => ({}));
-    const area_tag = (body.area_tag || '').trim();
-    const delivery_slot_at = body.delivery_slot_at;
+    const { area_tag, delivery_slot_at } = await req.json();
+    if (!area_tag) return jsonError('area_tag required');
+    if (!delivery_slot_at) return jsonError('delivery_slot_at required');
 
-    if (!area_tag) return jsonError('area_tag is required');
-    if (!isIsoDate(delivery_slot_at)) return jsonError('delivery_slot_at must be an ISO datetime');
-    if (!enforce20MinIncrement(delivery_slot_at))
-      return jsonError('Slot must be on a 20-minute boundary (e.g., 10:00, 10:20, 10:40)');
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    if (!url || !key) return jsonError('server missing supabase env', 500);
 
-    // Delegate to the canonical validator
-    const origin = process.env.NEXT_PUBLIC_APP_ORIGIN || req.nextUrl.origin;
-    const r = await fetch(`${origin}/api/areas/validate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      cache: 'no-store',
-      body: JSON.stringify({ area_tag, delivery_slot_at }),
-    });
+    const supabase = createClient(url, key, { auth: { persistSession: false } });
 
-    const payload = await r.json().catch(() => ({}));
-    if (!r.ok || !payload?.ok) {
-      return jsonError(payload?.error || 'Coverage not available', r.status || 409);
-    }
-    return NextResponse.json(payload); // { ok: true, reason: 'approved_request' | 'radius_ok' }
+    // Basic check: area exists and is active (anon policy must allow select active=true)
+    const { data: area, error } = await supabase
+      .from('areas')
+      .select('tag, active')
+      .eq('tag', area_tag)
+      .eq('active', true)
+      .maybeSingle();
+    if (error) return jsonError(error.message, 500);
+    if (!area) return jsonError('No active coverage for this area', 404);
+
+    // You can add additional soft rules here if needed…
+    return NextResponse.json({ ok: true, reason: 'area_active' });
   } catch (e) {
-    return jsonError((e && e.message) || 'Unexpected error', 500);
+    return jsonError(e?.message || 'unexpected error', 500);
   }
 }
 
