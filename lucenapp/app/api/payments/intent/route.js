@@ -6,7 +6,7 @@ import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { createClient } from '@supabase/supabase-js';
 
-/** ===== Helpers ===== */
+/* ========= helpers ========= */
 function supabaseCookieName() {
   const ref =
     (process.env.NEXT_PUBLIC_SUPABASE_URL || '').match(
@@ -32,10 +32,13 @@ function isIsoDate(s) {
   const d = new Date(s);
   return !Number.isNaN(d.getTime());
 }
-// must hit 20-min boundaries like :00, :20, :40 (UTC)
-function enforce20MinIncrement(iso) {
+function is20MinBoundary(iso) {
   const d = new Date(iso);
-  return d.getUTCMinutes() % 20 === 0 && d.getUTCSeconds() === 0 && d.getUTCMilliseconds() === 0;
+  return d.getUTCSeconds() === 0 && d.getUTCMilliseconds() === 0 && d.getUTCMinutes() % 20 === 0;
+}
+function cents(n) {
+  const x = Number(n);
+  return Number.isFinite(x) ? Math.max(0, Math.round(x)) : 0;
 }
 function randomId() {
   if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
@@ -45,29 +48,47 @@ function randomId() {
   }
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
-function cents(n) {
-  const x = Number(n);
-  return Number.isFinite(x) ? Math.max(0, Math.round(x)) : 0;
-}
 
-/** ===== Handler ===== */
+/* ========= handler ========= */
 export async function POST(req) {
   try {
     const body = await req.json().catch(() => ({}));
 
-    const area_tag = (body.area_tag || '').trim();
-    const delivery_slot_at = body.delivery_slot_at;
-    const cartTotalCents = cents(body.cartTotalCents);
-    const reservationId = typeof body.reservationId === 'string' ? body.reservationId : null;
-    const orderTempId = typeof body.orderTempId === 'string' ? body.orderTempId : null;
+    // Accept multiple aliases from different UIs
+    const area_tag = (
+      body.area_tag ??
+      body.areaTag ??
+      body.area ??
+      ''
+    ).toString().trim();
+
+    const delivery_slot_at = (
+      body.delivery_slot_at ??
+      body.deliverySlotAt ??
+      body.slotAt ??
+      body.slot ??
+      ''
+    ).toString().trim();
+
+    const cartTotalCents = cents(
+      body.cartTotalCents ?? body.totalCents ?? body.amount ?? 0
+    );
+    const reservationId =
+      typeof body.reservationId === 'string' && body.reservationId.trim()
+        ? body.reservationId.trim()
+        : null;
+    const orderTempId =
+      typeof body.orderTempId === 'string' && body.orderTempId.trim()
+        ? body.orderTempId.trim()
+        : null;
 
     if (!area_tag) return jsonError('area_tag is required');
     if (!isIsoDate(delivery_slot_at)) return jsonError('delivery_slot_at must be an ISO datetime');
-    if (!enforce20MinIncrement(delivery_slot_at))
-      return jsonError('Slot must be on a 20-minute boundary (e.g., 10:00, 10:20, 10:40)');
+    if (!is20MinBoundary(delivery_slot_at))
+      return jsonError('Slot must be on a 20-minute boundary (e.g., 10:00, 10:20, 10:40 UTC)');
     if (!cartTotalCents) return jsonError('cartTotalCents is required');
 
-    // Identify user
+    // Identify user (RLS + reservations)
     const store = await cookies();
     const token = store.get(supabaseCookieName())?.value || '';
     const supabase = supabaseWithBearer(token);
@@ -76,28 +97,20 @@ export async function POST(req) {
     if (meErr || !me?.user?.id) return jsonError('Not signed in', 401);
     const uid = me.user.id;
 
-    // 1) HARD GATE: must be validated for this area & slot
+    // HARD GATE: validate coverage (delegates to canonical validator)
     const origin = process.env.NEXT_PUBLIC_APP_ORIGIN || req.nextUrl.origin;
-    const valRes = await fetch(`${origin}/api/areas/validate`, {
+    const v = await fetch(`${origin}/api/areas/validate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       cache: 'no-store',
       body: JSON.stringify({ area_tag, delivery_slot_at }),
     });
-    if (!valRes.ok) {
-      let msg = 'Delivery not available yet';
-      try {
-        const j = await valRes.json();
-        if (j && j.error) msg = j.error;
-      } catch {}
-      return jsonError(msg, 409);
-    }
-    const val = await valRes.json();
-    if (!val?.ok) {
-      return jsonError(val?.error || 'Delivery not available yet', 409);
+    const vj = await v.json().catch(() => ({}));
+    if (!v.ok || !vj?.ok) {
+      return jsonError(vj?.error || 'Delivery not available for this area/slot', 409);
     }
 
-    // 2) If customer reserved loyalty points, verify non-expired & compute discount
+    // Optional loyalty reservation
     let discountCents = 0;
     if (reservationId) {
       const { data: rsv, error: rErr } = await supabase
@@ -107,12 +120,10 @@ export async function POST(req) {
         .single();
 
       if (rErr) return jsonError(rErr.message || 'Failed to check reservation', 500);
-
-      // Must be this user, not expired, not already committed, and match this order temp id (if provided)
-      const now = Date.now();
-      const expMs = rsv?.expires_at ? new Date(rsv.expires_at).getTime() : 0;
       if (!rsv || rsv.user_id !== uid) return jsonError('Reservation does not belong to you', 403);
-      if (!expMs || expMs <= now) return jsonError('Reservation expired', 409);
+
+      const expMs = rsv.expires_at ? new Date(rsv.expires_at).getTime() : 0;
+      if (!expMs || expMs <= Date.now()) return jsonError('Reservation expired', 409);
       if (rsv.committed_at) return jsonError('Reservation already used', 409);
       if (orderTempId && rsv.order_temp_id && rsv.order_temp_id !== orderTempId) {
         return jsonError('Reservation order mismatch', 409);
@@ -123,27 +134,23 @@ export async function POST(req) {
 
     const amountCents = Math.max(0, cartTotalCents - discountCents);
 
-    // 3) Create payment intent (DEMO provider). Real provider wiring can replace this.
-    const pi = `pi_${randomId()}`;
-    const clientSecret = `demo_${pi}_${randomId()}`;
-
-    // (Optional) You could persist a "pending charge" row here with the validation reason
-    // and the computed net amount. The actual commit happens in your webhook after capture.
+    // DEMO intent (swap in Stripe later)
+    const paymentIntentId = `pi_${randomId()}`;
+    const clientSecret = `demo_${paymentIntentId}_${randomId()}`;
 
     return NextResponse.json({
+      ok: true,
       provider: 'demo',
       amountCents,
-      paymentIntentId: pi,
+      discountCents,
+      paymentIntentId,
       clientSecret,
-      // surface useful echo:
       area_tag,
       delivery_slot_at,
-      validation: val?.reason || 'validated',
-      discountCents,
       orderTempId: orderTempId || null,
+      validation: vj?.reason || 'validated',
     });
   } catch (e) {
-    const msg = (e && e.message) || 'Unexpected error';
-    return jsonError(msg, 500);
+    return jsonError((e && e.message) || 'Unexpected error', 500);
   }
 }
