@@ -1,7 +1,6 @@
 'use client';
 
-
-import { Suspense, useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import {
   TIER_RATES_CENTS,
@@ -63,6 +62,8 @@ function CheckoutInner() {
   const [reservation, setReservation] = useState(null);
   const [countdown, setCountdown] = useState(0);
   const [intent, setIntent] = useState(null); // { provider, clientSecret, amountCents, paymentIntentId }
+  const [creating, setCreating] = useState(false); // NEW: disable button during request
+  const abortRef = useRef(null); // NEW: prevent parallel fetches
 
   // Areas & Slot (prefill from Plans)
   const [areas, setAreas] = useState([]);
@@ -153,25 +154,95 @@ function CheckoutInner() {
     return () => clearInterval(id);
   }, [reservation?.expiresAt]);
 
-  // Create (or recreate) intent from Checkout (if Plans wasn’t used)
+  // --- helpers for createIntent ---
+  function isTwentyMinuteBoundary(iso) {
+    try {
+      const d = new Date(iso);
+      return (
+        !Number.isNaN(d.getTime()) &&
+        d.getUTCSeconds() === 0 &&
+        d.getUTCMilliseconds() === 0 &&
+        d.getUTCMinutes() % 20 === 0
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  // Create (or recreate/update) intent from Checkout (if Plans wasn’t used)
   async function createIntent() {
     if (!areaTag) return alert('Choose a service area first.');
     if (!slotAt) return alert('Choose a delivery time slot first.');
-    const res = await fetch('/api/payments/intent', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        area_tag: areaTag,
-        delivery_slot_at: slotAt,
-        cartTotalCents,
-        reservationId: reservation?.id || null,
-        orderTempId,
-        tier,
-      })
-    });
-    const json = await res.json();
-    if (!res.ok) { alert(json.error || 'Failed to create intent'); return; }
-    setIntent(json);
-    try { if (json?.clientSecret) localStorage.setItem('lastClientSecret', json.clientSecret); } catch {}
+    if (!isTwentyMinuteBoundary(slotAt)) {
+      return alert('Time slot must land on a 20-minute boundary (e.g., 10:00, 10:20, 10:40 UTC).');
+    }
+    if (!cartTotalCents || cartTotalCents < 50) {
+      return alert('Cart total must be at least $0.50.');
+    }
+
+    // Prevent parallel POSTs
+    if (abortRef.current) abortRef.current.abort();
+    abortRef.current = new AbortController();
+    const timeoutId = setTimeout(() => abortRef.current?.abort(), 15000);
+
+    try {
+      setCreating(true);
+
+      const res = await fetch('/api/payments/intent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        cache: 'no-store',
+        signal: abortRef.current.signal,
+        body: JSON.stringify({
+          area_tag: areaTag,
+          delivery_slot_at: slotAt,
+          cartTotalCents,
+          reservationId: reservation?.id || null,
+          orderTempId,
+          tier,
+        })
+      });
+
+      const json = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        switch (res.status) {
+          case 401:
+            alert('Please sign in to continue.');
+            break;
+          case 422:
+            alert(json?.error || 'Some required fields are missing or invalid.');
+            break;
+          case 409:
+            if (json?.code === 'DELIVERY_UNAVAILABLE') {
+              alert(json?.reason || 'Delivery not available for this area/slot. Please choose another time.');
+            } else if (json?.code?.startsWith?.('RSV_')) {
+              alert(json?.error || 'There was a problem with your reservation.');
+            } else {
+              alert(json?.error || 'Conflict. Please try again.');
+            }
+            break;
+          default:
+            alert(json?.error || `Failed to create/update payment intent (status ${res.status}).`);
+        }
+        return;
+      }
+
+      // Success
+      setIntent(json);
+      try {
+        if (json?.clientSecret) {
+          localStorage.setItem('lastClientSecret', json.clientSecret);
+        }
+      } catch {}
+    } catch (e) {
+      if (e?.name === 'AbortError') return; // superseded by a newer click
+      alert(e?.message || 'Network error while creating payment intent.');
+    } finally {
+      clearTimeout(timeoutId);
+      setCreating(false);
+      abortRef.current = null;
+    }
   }
 
   // Confirm payment (Stripe Elements)
@@ -290,8 +361,12 @@ function CheckoutInner() {
       ) : (
         <div className="flex items-center justify-end gap-2">
           {!intent?.paymentIntentId && (
-            <button onClick={createIntent} className="border rounded-xl px-4 py-2 hover:shadow">
-              Create Payment Intent
+            <button
+              onClick={createIntent}
+              disabled={creating}
+              className="border rounded-xl px-4 py-2 hover:shadow disabled:opacity-50"
+            >
+              {creating ? 'Creating…' : 'Create Payment Intent'}
             </button>
           )}
           {!process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY && (
