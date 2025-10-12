@@ -58,7 +58,8 @@ function PlansInner() {
         if (!areaTag && items.length) setAreaTag(items[0].tag);
       } catch {}
     })();
-  }, []); // eslint-disable-line
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Day dropdown: today → +6 days
   const days = useMemo(() => {
@@ -138,7 +139,7 @@ function PlansInner() {
     const id = setInterval(tick, 1000); return () => clearInterval(id);
   }, [reservation?.expiresAt]);
 
-  // Create intent — try, if 401 redirect to sign-in; on success go to /checkout
+  // Create intent — if 401 redirect to sign-in; on success go to /checkout
   const [intent, setIntent] = useState(null);
   async function createIntent(){
     if (!areaTag) return alert('Choose a service area first.');
@@ -150,6 +151,7 @@ function PlansInner() {
       cartTotalCents,
       reservationId: reservation?.id || null,
       orderTempId,
+      tier, // include for metadata
     };
 
     const res = await fetch('/api/payments/intent', {
@@ -167,7 +169,7 @@ function PlansInner() {
     if (!res.ok) { alert(json.error || 'Failed to create intent'); return; }
     setIntent(json);
 
-    // Stash clientSecret so checkout can pick it up immediately (optional)
+    // Persist client secret so Checkout can render Elements right away
     try {
       if (json?.clientSecret) localStorage.setItem('lastClientSecret', json.clientSecret);
     } catch {}
@@ -177,7 +179,7 @@ function PlansInner() {
     url.searchParams.set('tier', tier);
     url.searchParams.set('area', areaTag);
     url.searchParams.set('slot', slotAt);                // ISO
-    url.searchParams.set('pi', json.paymentIntentId);    // demo id
+    url.searchParams.set('pi', json.paymentIntentId);    // Stripe PI id
     if (reservation?.id) url.searchParams.set('rsv', reservation.id);
 
     router.push(url.pathname + url.search);
@@ -293,7 +295,7 @@ function PlansInner() {
         >
           Create Payment Intent
         </button>
-        {intent?.provider === 'demo' && (
+        {intent?.provider === 'stripe' && (
           <span className="text-sm text-amber-300/80">Intent: {intent.paymentIntentId}</span>
         )}
       </div>
