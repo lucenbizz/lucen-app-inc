@@ -6,14 +6,15 @@ import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { createRouteHandlerClient } from '@supabase/auth-helpers-nextjs';
 import Stripe from 'stripe';
+import crypto from 'node:crypto';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: '2024-06-20',
 });
 
 /* ========= helpers ========= */
-function jsonError(msg, status = 400) {
-  return NextResponse.json({ error: msg }, { status });
+function jsonError(msg, status = 400, extra = {}) {
+  return NextResponse.json({ ok: false, error: msg, ...extra }, { status });
 }
 function isIsoDate(s) {
   if (!s || typeof s !== 'string') return false;
@@ -27,6 +28,11 @@ function is20MinBoundary(iso) {
 function cents(n) {
   const x = Number(n);
   return Number.isFinite(x) ? Math.max(0, Math.round(x)) : 0;
+}
+function stableKeyFromOrder(orderTempId) {
+  // A short stable key for the FIRST create only (not updates)
+  const base = orderTempId || 'noorder';
+  return 'intent_' + crypto.createHash('sha256').update(base).digest('hex').slice(0, 16);
 }
 
 /* ========= handler ========= */
@@ -54,21 +60,21 @@ export async function POST(req) {
         : null;
     const purchaseTier = (body.tier || body.purchaseTier || '').toString();
 
-    if (!area_tag) return jsonError('area_tag is required');
-    if (!isIsoDate(delivery_slot_at)) return jsonError('delivery_slot_at must be an ISO datetime');
+    if (!area_tag) return jsonError('area_tag is required', 422, { field: 'area_tag' });
+    if (!isIsoDate(delivery_slot_at))
+      return jsonError('delivery_slot_at must be an ISO datetime', 422, { field: 'delivery_slot_at' });
     if (!is20MinBoundary(delivery_slot_at))
-      return jsonError('Slot must be on a 20-minute boundary (e.g., 10:00, 10:20, 10:40 UTC)');
-    if (!cartTotalCents) return jsonError('cartTotalCents is required');
+      return jsonError('Slot must be on a 20-minute boundary (e.g., 10:00, 10:20, 10:40 UTC)', 422, { field: 'delivery_slot_at' });
+    if (!cartTotalCents) return jsonError('cartTotalCents is required', 422, { field: 'cartTotalCents' });
 
-    // ✅ Read Supabase session via route-handler client
-    const store = await cookies();
+    // ✅ Supabase user
+    const store = cookies(); // (no await needed)
     const supabase = createRouteHandlerClient({ cookies: () => store });
-
     const { data: { user }, error: meErr } = await supabase.auth.getUser();
-    if (meErr || !user?.id) return jsonError('Not signed in', 401);
+    if (meErr || !user?.id) return jsonError('Not signed in', 401, { code: 'AUTH_REQUIRED' });
     const uid = user.id;
 
-    // HARD GATE: coverage validation (keeps “request/approval” logic centralized)
+    // HARD GATE: coverage validation
     const origin = process.env.NEXT_PUBLIC_APP_ORIGIN || req.nextUrl.origin;
     const v = await fetch(`${origin}/api/areas/validate`, {
       method: 'POST',
@@ -78,7 +84,11 @@ export async function POST(req) {
     });
     const vj = await v.json().catch(() => ({}));
     if (!v.ok || !vj?.ok) {
-      return jsonError(vj?.error || 'Delivery not available for this area/slot', 409);
+      // keep 409 for “business conflict” but include a clear reason
+      return jsonError(vj?.error || 'Delivery not available for this area/slot', 409, {
+        code: 'DELIVERY_UNAVAILABLE',
+        reason: vj?.reason ?? null,
+      });
     }
 
     // Optional loyalty reservation check → compute discountCents
@@ -90,14 +100,14 @@ export async function POST(req) {
         .eq('id', reservationId)
         .maybeSingle();
 
-      if (rErr) return jsonError(rErr.message || 'Failed to check reservation', 500);
-      if (!rsv || rsv.user_id !== uid) return jsonError('Reservation does not belong to you', 403);
+      if (rErr) return jsonError(rErr.message || 'Failed to check reservation', 500, { code: 'RSV_LOOKUP_FAILED' });
+      if (!rsv || rsv.user_id !== uid) return jsonError('Reservation does not belong to you', 403, { code: 'RSV_FORBIDDEN' });
 
       const expMs = rsv.expires_at ? new Date(rsv.expires_at).getTime() : 0;
-      if (!expMs || expMs <= Date.now()) return jsonError('Reservation expired', 409);
-      if (rsv.committed_at) return jsonError('Reservation already used', 409);
+      if (!expMs || expMs <= Date.now()) return jsonError('Reservation expired', 409, { code: 'RSV_EXPIRED' });
+      if (rsv.committed_at) return jsonError('Reservation already used', 409, { code: 'RSV_USED' });
       if (orderTempId && rsv.order_temp_id && rsv.order_temp_id !== orderTempId) {
-        return jsonError('Reservation order mismatch', 409);
+        return jsonError('Reservation order mismatch', 409, { code: 'RSV_ORDER_MISMATCH' });
       }
 
       discountCents = cents(rsv.value_cents);
@@ -105,41 +115,138 @@ export async function POST(req) {
 
     const amountCents = Math.max(0, cartTotalCents - discountCents);
 
-    // --- Stripe PaymentIntent ---
-    const paymentIntent = await stripe.paymentIntents.create(
-      {
-        amount: amountCents,
-        currency: 'usd',
-        automatic_payment_methods: { enabled: true },
-        metadata: {
-          user_id: uid,
-          area_tag,
-          delivery_slot_at,
-          order_temp_id: orderTempId || '',
-          reservation_id: reservationId || '',
-          purchase_tier: purchaseTier,
-          discount_cents: String(discountCents || 0),
-        },
-      },
-      {
-        // A strong idempotency key prevents dupes on retries
-        idempotencyKey: `intent_${orderTempId || 'noorder'}_${amountCents}`,
+    // ---------- Stripe PaymentIntent: reuse/update instead of always creating ----------
+    const cookieName = orderTempId ? `pi_${orderTempId}` : 'payment_intent_id';
+    const existingPiId = store.get(cookieName)?.value || null;
+
+    let intent = null;
+
+    try {
+      if (existingPiId) {
+        const current = await stripe.paymentIntents.retrieve(existingPiId);
+
+        // Updatable states
+        if (
+          current.status === 'requires_payment_method' ||
+          current.status === 'requires_confirmation'
+        ) {
+          intent = await stripe.paymentIntents.update(existingPiId, {
+            amount: amountCents,
+            currency: 'usd',
+            metadata: {
+              ...current.metadata,
+              user_id: uid,
+              area_tag,
+              delivery_slot_at,
+              order_temp_id: orderTempId || '',
+              reservation_id: reservationId || '',
+              purchase_tier: purchaseTier,
+              discount_cents: String(discountCents || 0),
+            },
+          });
+        } else if (
+          current.status === 'canceled' ||
+          current.status === 'succeeded' ||
+          current.status === 'requires_capture'
+        ) {
+          // Not safe to update — fall through to create a new one
+        } else {
+          // Fallback: try to update anyway
+          intent = await stripe.paymentIntents.update(existingPiId, {
+            amount: amountCents,
+            currency: 'usd',
+            metadata: {
+              ...current.metadata,
+              user_id: uid,
+              area_tag,
+              delivery_slot_at,
+              order_temp_id: orderTempId || '',
+              reservation_id: reservationId || '',
+              purchase_tier: purchaseTier,
+              discount_cents: String(discountCents || 0),
+            },
+          });
+        }
       }
+    } catch (e) {
+      // If retrieving/updating the old PI fails (e.g., no longer exists), proceed to create below
+    }
+
+    if (!intent) {
+      // First create for this order/session with a STABLE idempotency key (not tied to amount)
+      const idem = stableKeyFromOrder(orderTempId || '');
+      intent = await stripe.paymentIntents.create(
+        {
+          amount: amountCents,
+          currency: 'usd',
+          automatic_payment_methods: { enabled: true },
+          metadata: {
+            user_id: uid,
+            area_tag,
+            delivery_slot_at,
+            order_temp_id: orderTempId || '',
+            reservation_id: reservationId || '',
+            purchase_tier: purchaseTier,
+            discount_cents: String(discountCents || 0),
+          },
+        },
+        { idempotencyKey: idem }
+      );
+    }
+
+    const res = NextResponse.json(
+      {
+        ok: true,
+        provider: 'stripe',
+        amountCents,
+        discountCents,
+        paymentIntentId: intent.id,
+        clientSecret: intent.client_secret,
+        area_tag,
+        delivery_slot_at,
+        orderTempId: orderTempId || null,
+        validation: vj?.reason || 'validated',
+      },
+      { status: 200 }
     );
 
-    return NextResponse.json({
-      ok: true,
-      provider: 'stripe',
-      amountCents,
-      discountCents,
-      paymentIntentId: paymentIntent.id,
-      clientSecret: paymentIntent.client_secret,
-      area_tag,
-      delivery_slot_at,
-      orderTempId: orderTempId || null,
-      validation: vj?.reason || 'validated',
+    // Persist PI id for this order/session
+    res.cookies.set(cookieName, intent.id, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: true,
+      path: '/',
+      maxAge: 60 * 60 * 24 * 7,
     });
+
+    return res;
   } catch (e) {
-    return jsonError(e?.message || 'Unexpected error', 500);
+    // If Stripe sends a conflict, try to recover by returning the last PI in the cookie
+    const store = cookies();
+    const piFallback =
+      store.get('payment_intent_id')?.value ||
+      (store.getAll().find(c => c.name.startsWith('pi_'))?.value ?? null);
+
+    if (e?.statusCode === 409 && piFallback) {
+      try {
+        const existing = await stripe.paymentIntents.retrieve(piFallback);
+        return NextResponse.json(
+          {
+            ok: true,
+            recovered: true,
+            paymentIntentId: existing.id,
+            clientSecret: existing.client_secret,
+            status: existing.status,
+          },
+          { status: 200 }
+        );
+      } catch {}
+    }
+
+    return jsonError(e?.message || 'Unexpected error', e?.statusCode ?? 500, {
+      code: e?.code ?? 'UNEXPECTED',
+      type: e?.type ?? null,
+      statusCode: e?.statusCode ?? 500,
+    });
   }
 }
