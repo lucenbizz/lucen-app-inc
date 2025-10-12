@@ -34,7 +34,7 @@ export async function POST(req) {
   try {
     const body = await req.json().catch(() => ({}));
 
-    // Accept aliases from different UIs
+    // Accept common aliases
     const area_tag = (body.area_tag ?? body.areaTag ?? body.area ?? '').toString().trim();
     const delivery_slot_at = (
       body.delivery_slot_at ??
@@ -43,7 +43,6 @@ export async function POST(req) {
       body.slot ??
       ''
     ).toString().trim();
-
     const cartTotalCents = cents(body.cartTotalCents ?? body.totalCents ?? body.amount ?? 0);
     const reservationId =
       typeof body.reservationId === 'string' && body.reservationId.trim()
@@ -53,7 +52,7 @@ export async function POST(req) {
       typeof body.orderTempId === 'string' && body.orderTempId.trim()
         ? body.orderTempId.trim()
         : null;
-    const purchaseTier = (body.tier || '').toString();
+    const purchaseTier = (body.tier || body.purchaseTier || '').toString();
 
     if (!area_tag) return jsonError('area_tag is required');
     if (!isIsoDate(delivery_slot_at)) return jsonError('delivery_slot_at must be an ISO datetime');
@@ -61,14 +60,15 @@ export async function POST(req) {
       return jsonError('Slot must be on a 20-minute boundary (e.g., 10:00, 10:20, 10:40 UTC)');
     if (!cartTotalCents) return jsonError('cartTotalCents is required');
 
-    // ✅ Supabase auth by cookies (RLS-safe)
+    // ✅ Read Supabase session via route-handler client
     const store = await cookies();
     const supabase = createRouteHandlerClient({ cookies: () => store });
+
     const { data: { user }, error: meErr } = await supabase.auth.getUser();
     if (meErr || !user?.id) return jsonError('Not signed in', 401);
     const uid = user.id;
 
-    // HARD GATE: centralized coverage validator
+    // HARD GATE: coverage validation (keeps “request/approval” logic centralized)
     const origin = process.env.NEXT_PUBLIC_APP_ORIGIN || req.nextUrl.origin;
     const v = await fetch(`${origin}/api/areas/validate`, {
       method: 'POST',
@@ -81,14 +81,14 @@ export async function POST(req) {
       return jsonError(vj?.error || 'Delivery not available for this area/slot', 409);
     }
 
-    // Optional: verify loyalty reservation
+    // Optional loyalty reservation check → compute discountCents
     let discountCents = 0;
     if (reservationId) {
       const { data: rsv, error: rErr } = await supabase
         .from('loyalty_reservations')
         .select('id, user_id, value_cents, expires_at, committed_at, order_temp_id')
         .eq('id', reservationId)
-        .single();
+        .maybeSingle();
 
       if (rErr) return jsonError(rErr.message || 'Failed to check reservation', 500);
       if (!rsv || rsv.user_id !== uid) return jsonError('Reservation does not belong to you', 403);
@@ -105,7 +105,7 @@ export async function POST(req) {
 
     const amountCents = Math.max(0, cartTotalCents - discountCents);
 
-    // ---- Stripe PaymentIntent ----
+    // --- Stripe PaymentIntent ---
     const paymentIntent = await stripe.paymentIntents.create(
       {
         amount: amountCents,
@@ -118,9 +118,11 @@ export async function POST(req) {
           order_temp_id: orderTempId || '',
           reservation_id: reservationId || '',
           purchase_tier: purchaseTier,
+          discount_cents: String(discountCents || 0),
         },
       },
       {
+        // A strong idempotency key prevents dupes on retries
         idempotencyKey: `intent_${orderTempId || 'noorder'}_${amountCents}`,
       }
     );
@@ -138,6 +140,6 @@ export async function POST(req) {
       validation: vj?.reason || 'validated',
     });
   } catch (e) {
-    return jsonError((e && e.message) || 'Unexpected error', 500);
+    return jsonError(e?.message || 'Unexpected error', 500);
   }
 }
