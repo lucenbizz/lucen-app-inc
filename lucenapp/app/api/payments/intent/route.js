@@ -4,26 +4,14 @@ export const dynamic = 'force-dynamic';
 
 import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { createClient } from '@supabase/supabase-js';
+import { createRouteHandlerClient } from '@supabase/auth-helpers-nextjs';
+import Stripe from 'stripe';
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
+  apiVersion: '2024-06-20',
+});
 
 /* ========= helpers ========= */
-function supabaseCookieName() {
-  const ref =
-    (process.env.NEXT_PUBLIC_SUPABASE_URL || '').match(
-      /^https?:\/\/([a-z0-9-]+)\.supabase\.co/i
-    )?.[1] || 'khzbliduummbypuxqnfn';
-  return `sb-${ref}-auth-token`;
-}
-function supabaseWithBearer(token) {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-    {
-      global: { headers: token ? { Authorization: `Bearer ${token}` } : {} },
-      auth: { persistSession: false, autoRefreshToken: false },
-    }
-  );
-}
 function jsonError(msg, status = 400) {
   return NextResponse.json({ error: msg }, { status });
 }
@@ -40,28 +28,14 @@ function cents(n) {
   const x = Number(n);
   return Number.isFinite(x) ? Math.max(0, Math.round(x)) : 0;
 }
-function randomId() {
-  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-    const a = new Uint32Array(4);
-    crypto.getRandomValues(a);
-    return [...a].map((x) => x.toString(16).padStart(8, '0')).join('');
-  }
-  return Math.random().toString(36).slice(2) + Date.now().toString(36);
-}
 
 /* ========= handler ========= */
 export async function POST(req) {
   try {
     const body = await req.json().catch(() => ({}));
 
-    // Accept multiple aliases from different UIs
-    const area_tag = (
-      body.area_tag ??
-      body.areaTag ??
-      body.area ??
-      ''
-    ).toString().trim();
-
+    // Accept aliases from different UIs
+    const area_tag = (body.area_tag ?? body.areaTag ?? body.area ?? '').toString().trim();
     const delivery_slot_at = (
       body.delivery_slot_at ??
       body.deliverySlotAt ??
@@ -70,9 +44,7 @@ export async function POST(req) {
       ''
     ).toString().trim();
 
-    const cartTotalCents = cents(
-      body.cartTotalCents ?? body.totalCents ?? body.amount ?? 0
-    );
+    const cartTotalCents = cents(body.cartTotalCents ?? body.totalCents ?? body.amount ?? 0);
     const reservationId =
       typeof body.reservationId === 'string' && body.reservationId.trim()
         ? body.reservationId.trim()
@@ -81,6 +53,7 @@ export async function POST(req) {
       typeof body.orderTempId === 'string' && body.orderTempId.trim()
         ? body.orderTempId.trim()
         : null;
+    const purchaseTier = (body.tier || '').toString();
 
     if (!area_tag) return jsonError('area_tag is required');
     if (!isIsoDate(delivery_slot_at)) return jsonError('delivery_slot_at must be an ISO datetime');
@@ -88,16 +61,14 @@ export async function POST(req) {
       return jsonError('Slot must be on a 20-minute boundary (e.g., 10:00, 10:20, 10:40 UTC)');
     if (!cartTotalCents) return jsonError('cartTotalCents is required');
 
-    // Identify user (RLS + reservations)
+    // ✅ Supabase auth by cookies (RLS-safe)
     const store = await cookies();
-    const token = store.get(supabaseCookieName())?.value || '';
-    const supabase = supabaseWithBearer(token);
+    const supabase = createRouteHandlerClient({ cookies: () => store });
+    const { data: { user }, error: meErr } = await supabase.auth.getUser();
+    if (meErr || !user?.id) return jsonError('Not signed in', 401);
+    const uid = user.id;
 
-    const { data: me, error: meErr } = await supabase.auth.getUser();
-    if (meErr || !me?.user?.id) return jsonError('Not signed in', 401);
-    const uid = me.user.id;
-
-    // HARD GATE: validate coverage (delegates to canonical validator)
+    // HARD GATE: centralized coverage validator
     const origin = process.env.NEXT_PUBLIC_APP_ORIGIN || req.nextUrl.origin;
     const v = await fetch(`${origin}/api/areas/validate`, {
       method: 'POST',
@@ -110,7 +81,7 @@ export async function POST(req) {
       return jsonError(vj?.error || 'Delivery not available for this area/slot', 409);
     }
 
-    // Optional loyalty reservation
+    // Optional: verify loyalty reservation
     let discountCents = 0;
     if (reservationId) {
       const { data: rsv, error: rErr } = await supabase
@@ -134,17 +105,33 @@ export async function POST(req) {
 
     const amountCents = Math.max(0, cartTotalCents - discountCents);
 
-    // DEMO intent (swap in Stripe later)
-    const paymentIntentId = `pi_${randomId()}`;
-    const clientSecret = `demo_${paymentIntentId}_${randomId()}`;
+    // ---- Stripe PaymentIntent ----
+    const paymentIntent = await stripe.paymentIntents.create(
+      {
+        amount: amountCents,
+        currency: 'usd',
+        automatic_payment_methods: { enabled: true },
+        metadata: {
+          user_id: uid,
+          area_tag,
+          delivery_slot_at,
+          order_temp_id: orderTempId || '',
+          reservation_id: reservationId || '',
+          purchase_tier: purchaseTier,
+        },
+      },
+      {
+        idempotencyKey: `intent_${orderTempId || 'noorder'}_${amountCents}`,
+      }
+    );
 
     return NextResponse.json({
       ok: true,
-      provider: 'demo',
+      provider: 'stripe',
       amountCents,
       discountCents,
-      paymentIntentId,
-      clientSecret,
+      paymentIntentId: paymentIntent.id,
+      clientSecret: paymentIntent.client_secret,
       area_tag,
       delivery_slot_at,
       orderTempId: orderTempId || null,
