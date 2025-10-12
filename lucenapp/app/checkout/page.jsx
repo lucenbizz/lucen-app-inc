@@ -16,6 +16,11 @@ import {
   REDEEM_STEP,
 } from '../lib/loyalty';
 
+import { Elements, PaymentElement, useStripe, useElements } from '@stripe/react-stripe-js';
+import { loadStripe } from '@stripe/stripe-js';
+
+const stripePromise = loadStripe(process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY || '');
+
 export default function CheckoutPage() {
   return (
     <Suspense fallback={<main className="p-6 max-w-3xl mx-auto">Loading…</main>}>
@@ -46,26 +51,24 @@ function CheckoutInner() {
       } catch {}
     })();
   }, []);
-
   const maxRedeemPts = useMemo(
     () => maxRedeemablePoints(balance, cartTotalCents),
     [balance, cartTotalCents]
   );
   const [redeemPts, setRedeemPts] = useState(0);
 
-  // Reservation state
+  // Reservation / intent
   const [orderTempId] = useState(() => cryptoRandomId());
-  const [reservation, setReservation] = useState(null); // { id, valueCents, expiresAt, pointsReserved }
+  const [reservation, setReservation] = useState(null);
   const [countdown, setCountdown] = useState(0);
   const [intent, setIntent] = useState(null); // { provider, clientSecret, amountCents, paymentIntentId }
 
-  // === Areas & Slot (prefill from querystring if present) ===
-  const [areas, setAreas] = useState([]);            // [{tag,name}]
+  // Areas & Slot (prefill from Plans)
+  const [areas, setAreas] = useState([]);
   const [areaTag, setAreaTag] = useState('');
   const [slotAt, setSlotAt] = useState('');
   const piFromQuery = params.get('pi') || '';
 
-  // Load active areas (works for signed-out users too if anon policy is set)
   useEffect(() => {
     (async () => {
       try {
@@ -73,7 +76,7 @@ function CheckoutInner() {
         const j = await r.json();
         const items = Array.isArray(j.items) ? j.items : [];
         setAreas(items);
-        // Prefill from URL first; otherwise default to first area
+
         const areaParam = params.get('area');
         if (areaParam) setAreaTag(areaParam);
         else if (items.length) setAreaTag(items[0].tag);
@@ -82,7 +85,7 @@ function CheckoutInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Prefill the slot/tier/intent from query + localStorage
+  // Prefill tier/slot and intent secret from Plans/localStorage
   useEffect(() => {
     const urlTier = (params.get('tier') || '').toLowerCase();
     if (urlTier && TIER_ORDER.includes(urlTier)) setTier(urlTier);
@@ -90,17 +93,21 @@ function CheckoutInner() {
     const slotParam = params.get('slot');
     if (slotParam) setSlotAt(slotParam);
 
-    // If plans created the intent, pick up the clientSecret so we can render immediately
     try {
       const cs = localStorage.getItem('lastClientSecret');
       if (cs && piFromQuery) {
-        setIntent({ provider: 'demo', clientSecret: cs, paymentIntentId: piFromQuery, amountCents: TIER_RATES_CENTS[urlTier || 'bronze'] });
+        setIntent({
+          provider: 'stripe',
+          clientSecret: cs,
+          paymentIntentId: piFromQuery,
+          amountCents: TIER_RATES_CENTS[urlTier || 'bronze'],
+        });
       }
     } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Build a list of the next N slots on 20-minute boundaries (UTC)
+  // Build next 72 slots (20 min apart) in UTC (fallback UI)
   const slots = useMemo(() => {
     const out = [];
     const now = new Date();
@@ -115,13 +122,9 @@ function CheckoutInner() {
     }
     return out;
   }, []);
+  useEffect(() => { if (!slotAt && slots.length) setSlotAt(slots[0].iso); }, [slots, slotAt]);
 
-  // If no slot from URL, default to first
-  useEffect(() => {
-    if (!slotAt && slots.length) setSlotAt(slots[0].iso);
-  }, [slots, slotAt]);
-
-  // === Loyalty reservation ===
+  // Loyalty reservation
   async function reservePoints(points) {
     if (!points) { setReservation(null); setIntent(null); return; }
     const res = await fetch('/api/loyalty/reserve', {
@@ -138,8 +141,6 @@ function CheckoutInner() {
     });
     setIntent(null);
   }
-
-  // countdown to expiry
   useEffect(() => {
     if (!reservation?.expiresAt) { setCountdown(0); return; }
     const tick = () => {
@@ -151,11 +152,10 @@ function CheckoutInner() {
     return () => clearInterval(id);
   }, [reservation?.expiresAt]);
 
-  // Create payment intent (uses reservation's discount)
+  // Create (or recreate) intent from Checkout (if Plans wasn’t used)
   async function createIntent() {
     if (!areaTag) return alert('Choose a service area first.');
     if (!slotAt) return alert('Choose a delivery time slot first.');
-
     const res = await fetch('/api/payments/intent', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -164,51 +164,29 @@ function CheckoutInner() {
         cartTotalCents,
         reservationId: reservation?.id || null,
         orderTempId,
+        tier,
       })
     });
     const json = await res.json();
     if (!res.ok) { alert(json.error || 'Failed to create intent'); return; }
     setIntent(json);
-
-    // Store client secret for refresh-safe payment element
-    try {
-      if (json?.clientSecret) localStorage.setItem('lastClientSecret', json.clientSecret);
-    } catch {}
+    try { if (json?.clientSecret) localStorage.setItem('lastClientSecret', json.clientSecret); } catch {}
   }
 
-  // DEMO: simulate payment success (commits reservation via webhook)
-  async function simulatePaySuccess() {
-    if (!intent?.paymentIntentId) return alert('Create payment intent first.');
-    const res = await fetch('/api/payments/webhook', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        provider: 'demo',
-        type: 'payment.succeeded',
-        payment_intent_id: intent.paymentIntentId,
-        amount_cents: intent.amountCents || cartTotalCents,
-        purchaseTier: tier,
-        area_tag: areaTag,
-        delivery_slot_at: slotAt,
-      }),
-    });
-    const json = await res.json();
-    if (!res.ok) return alert(json.error || 'Webhook failed');
-    alert('Payment committed. Points redeemed and new points awarded on the net charge.');
-  }
-
-  // UI computations
+  // Confirm payment (Stripe Elements)
+  const canRenderElements = !!(intent?.provider === 'stripe' && intent?.clientSecret && process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY);
   const discountCents = reservation?.valueCents || 0;
   const totalCents = Math.max(0, cartTotalCents - discountCents);
   const willEarn = pointsFor(totalCents, tier);
 
-  // Reset when tier changes
-  useEffect(() => { setRedeemPts(0); setReservation(null); /* keep intent if prefilled */ }, [tier]);
+  // Reset on tier change (keep intent if it matches new tier only if you want)
+  useEffect(() => { setRedeemPts(0); setReservation(null); }, [tier]);
 
   return (
     <main className="p-6 max-w-3xl mx-auto space-y-4">
       <h1 className="text-2xl font-bold">Checkout</h1>
 
-      {/* Tier picker */}
+      {/* Tier */}
       <div className="border rounded-2xl p-4">
         <div className="font-semibold mb-2">Select ebook tier</div>
         <div className="grid gap-2 sm:grid-cols-2">
@@ -244,24 +222,24 @@ function CheckoutInner() {
             </select>
           </label>
 
-          <label className="block">
-            <div className="text-sm font-semibold mb-1">Delivery time (20-min slots, UTC)</div>
-            <select
-              value={slotAt}
-              onChange={(e)=>setSlotAt(e.target.value)}
-              className="w-full rounded-xl bg-white border px-3 py-2"
-            >
-              {slots.map(s => (
-                <option key={s.iso} value={s.iso}>{s.label}</option>
-              ))}
-            </select>
-          </label>
-        </div>
-
-        <div className="text-xs text-gray-600">
-          Selected: area=<code>{areaTag || '—'}</code>, slot=<code>{slotAt || '—'}</code>
-        </div>
+        <label className="block">
+          <div className="text-sm font-semibold mb-1">Delivery time (20-min slots, UTC)</div>
+          <select
+            value={slotAt}
+            onChange={(e)=>setSlotAt(e.target.value)}
+            className="w-full rounded-xl bg-white border px-3 py-2"
+          >
+            {slots.map(s => (
+              <option key={s.iso} value={s.iso}>{s.label}</option>
+            ))}
+          </select>
+        </label>
       </div>
+
+      <div className="text-xs text-gray-600">
+        Selected: area=<code>{areaTag || '—'}</code>, slot=<code>{slotAt || '—'}</code>
+      </div>
+    </div>
 
       {/* Summary + Loyalty */}
       <div className="border rounded-2xl p-4 space-y-2">
@@ -290,39 +268,89 @@ function CheckoutInner() {
           {reservation && (
             <div className="mt-2 text-sm flex items-center gap-3">
               <span className="px-2 py-1 border rounded-xl bg-gray-50">
-                Reserved: {reservation.pointsReserved.toLocaleString()} pts (−${centsToUSD(discountCents)})
+                Reserved: {reservation.pointsReserved.toLocaleString()} pts (−${centsToUSD(reservation.valueCents || 0)})
               </span>
               <span className="text-gray-600">Expires in {countdown}s</span>
-              {countdown === 0 && (
-                <button className="text-xs border rounded-xl px-2 py-1" onClick={()=>reservePoints(redeemPts || REDEEM_STEP)}>Re-reserve</button>
-              )}
             </div>
           )}
 
           <div className="flex items-center justify-end gap-4 pt-2">
-            <div className="text-sm">Discount: <strong>${centsToUSD(discountCents)}</strong></div>
+            <div className="text-sm">Discount: <strong>${centsToUSD(reservation?.valueCents || 0)}</strong></div>
             <div className="text-xl font-bold">Total: ${centsToUSD(totalCents)}</div>
           </div>
         </div>
       </div>
 
-      {/* Actions */}
-      <div className="flex items-center justify-end gap-2">
-        {!intent?.paymentIntentId && (
-          <button onClick={createIntent} className="border rounded-xl px-4 py-2 hover:shadow">
-            Create Payment Intent
-          </button>
-        )}
-        {intent?.provider === 'demo' && (
-          <button onClick={simulatePaySuccess} className="border rounded-xl px-4 py-2 hover:shadow">
-            DEMO: Simulate Paid
-          </button>
-        )}
-      </div>
+      {/* Payment (Stripe Elements) */}
+      {canRenderElements ? (
+        <Elements stripe={stripePromise} options={{ clientSecret: intent.clientSecret }}>
+          <StripeForm />
+        </Elements>
+      ) : (
+        <div className="flex items-center justify-end gap-2">
+          {!intent?.paymentIntentId && (
+            <button onClick={createIntent} className="border rounded-xl px-4 py-2 hover:shadow">
+              Create Payment Intent
+            </button>
+          )}
+          {!process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY && (
+            <p className="text-xs text-gray-500">
+              Set <code>NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY</code> to render the payment form.
+            </p>
+          )}
+        </div>
+      )}
     </main>
   );
 }
 
+/* ---- Stripe Card Form ---- */
+function StripeForm() {
+  const stripe = useStripe();
+  const elements = useElements();
+  const [submitting, setSubmitting] = useState(false);
+  const [msg, setMsg] = useState('');
+
+  const onPay = async (e) => {
+    e.preventDefault();
+    if (!stripe || !elements) return;
+    setSubmitting(true);
+    setMsg('');
+
+    const { error } = await stripe.confirmPayment({
+      elements,
+      confirmParams: {
+        // Optional: redirect to a receipt page that reads PI from query
+        return_url: typeof window !== 'undefined'
+          ? `${window.location.origin}/checkout/thank-you`
+          : undefined,
+      },
+      redirect: 'if_required', // allow in-page confirmations (US cards)
+    });
+
+    if (error) {
+      setMsg(error.message || 'Payment failed');
+    } else {
+      setMsg('Payment processing… you may be redirected if required.');
+    }
+    setSubmitting(false);
+  };
+
+  return (
+    <form onSubmit={onPay} className="border rounded-2xl p-4 space-y-3">
+      <PaymentElement />
+      <button
+        disabled={!stripe || submitting}
+        className="border rounded-xl px-4 py-2 hover:shadow disabled:opacity-50"
+      >
+        {submitting ? 'Processing…' : 'Pay now'}
+      </button>
+      {msg && <p className="text-sm text-gray-600">{msg}</p>}
+    </form>
+  );
+}
+
+/* ---- Small UI helpers ---- */
 function RedeemPicker({ value, onChange, max }) {
   const steps = [];
   for (let p = 0; p <= max; p += REDEEM_STEP) steps.push(p);
