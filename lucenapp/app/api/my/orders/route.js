@@ -7,6 +7,10 @@ import { cookies } from 'next/headers';
 import { createClient } from '@supabase/supabase-js';
 
 /* ---------- helpers ---------- */
+function json(data, status = 200) {
+  return NextResponse.json(data, { status });
+}
+
 function supabaseCookieName() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
   const m = url.match(/^https?:\/\/([a-z0-9-]+)\.supabase\.co/i);
@@ -15,11 +19,11 @@ function supabaseCookieName() {
 }
 
 function getAccessTokenFromCookies(store) {
-  // Preferred (server-side helper cookie)
+  // 1) Direct server cookie set by @supabase/auth-helpers
   const direct = store.get('sb-access-token')?.value;
   if (direct) return direct;
 
-  // Fallback: browser cookie sb-<ref>-auth-token = URL-encoded JSON [access, refresh]
+  // 2) Browser cookie: sb-<ref>-auth-token is URL-encoded JSON: [access, refresh]
   const comboRaw = store.get(supabaseCookieName())?.value;
   if (comboRaw) {
     try {
@@ -42,29 +46,38 @@ function supabaseWithBearer(token) {
   });
 }
 
-function json(data, status = 200) {
-  return NextResponse.json(data, { status });
-}
-
-/* ---------- handler ---------- */
+/* ---------- handlers ---------- */
 export async function GET(req) {
   try {
-    const store = cookies(); // <-- sync (do not await)
+    const store = cookies(); // <-- sync (do NOT await)
     const token = getAccessTokenFromCookies(store);
-    if (!token) return json({ ok: false, error: 'Not signed in' }, 401);
+    if (!token) {
+      return json({ ok: false, error: 'Not signed in' }, 401);
+    }
 
+    // query params
     const url = new URL(req.url);
-    const rawLimit = parseInt(url.searchParams.get('limit') || '100', 10);
-    const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 200) : 100;
+    const rawLimit = parseInt(url.searchParams.get('limit') ?? '20', 10);
+    const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 100) : 20;
     const status = url.searchParams.get('status') || null;
 
     const supabase = supabaseWithBearer(token);
 
-    // RLS should restrict to auth.uid() rows; select only what you need
+    // With RLS, this should return only the caller's rows using auth.uid().
     let q = supabase
       .from('orders')
       .select(
-        'id, created_at, tier, area_tag, delivery_slot_at, status, price_cents, customer_email, assigned_to_name'
+        [
+          'id',
+          'created_at',
+          'tier',
+          'area_tag',
+          'delivery_slot_at',
+          'status',
+          'price_cents',
+          'customer_email',
+          'assigned_to_name',
+        ].join(',')
       )
       .order('created_at', { ascending: false })
       .limit(limit);
@@ -73,19 +86,20 @@ export async function GET(req) {
 
     const { data, error } = await q;
 
-    if (error?.code === 'PGRST301' || error?.code === 'PGRST302') {
-      // common RLS / permission errors
-      return json({ ok: false, error: error.message }, 403);
+    // If RLS blocks, PostgREST may return an error; surface clearly
+    if (error) {
+      // Example: invalid JWT / RLS forbidden
+      const code = error.code || 'POSTGREST_ERROR';
+      const http = code === 'PGRST301' ? 401 : 403; // heuristic; adjust if you prefer
+      return json({ ok: false, error: error.message, code }, http);
     }
-    if (error) return json({ ok: false, error: error.message }, 500);
 
-    return json({ ok: true, count: data?.length || 0, items: data || [] }, 200);
+    return json({ ok: true, count: data?.length ?? 0, items: data ?? [] }, 200);
   } catch (e) {
     return json({ ok: false, error: e?.message || 'Failed to load orders' }, 500);
   }
 }
 
 export async function POST() {
-  // If POST isn't supported, be explicit rather than 500-ing
   return NextResponse.json({ ok: false, error: 'Method Not Allowed' }, { status: 405 });
 }
