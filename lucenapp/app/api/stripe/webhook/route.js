@@ -21,11 +21,13 @@ export async function POST(req) {
   try {
     switch (event.type) {
       case 'payment_intent.succeeded': {
+                // eslint-disable-next-line @typescript-eslint/no-unused-vars
         const pi = event.data.object;
         // TODO: mark order paid, grant access, send receipt, etc.
         break;
       }
       case 'payment_intent.payment_failed': {
+                // eslint-disable-next-line @typescript-eslint/no-unused-vars
         const pi = event.data.object;
         // TODO: notify user or log failure
         break;
