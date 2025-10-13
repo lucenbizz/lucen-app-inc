@@ -1,48 +1,36 @@
+// app/api/areas/[tag]/route.js
 export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
-import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { createRouteHandlerClient } from "@supabase/auth-helpers-nextjs";
+import { NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
+
+function json(d, s = 200) { return NextResponse.json(d, { status: s }); }
+function supabaseAnon() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+    { auth: { persistSession: false, autoRefreshToken: false } }
+  );
+}
+
 export async function GET(_req, { params }) {
-const supabase = createRouteHandlerClient({ cookies });
-const { data: { session } } = await supabase.auth.getSession();
-if (!session) return NextResponse.json({ error: "Not authenticated" }, {
-status: 401 });
-const tag = params?.tag;
-const { data, error } = await supabase
-.from("service_areas")
-.select("tag, name, center_lat, center_lng, radius_km, active")
-.eq("tag", tag)
-.single();
-if (error) return NextResponse.json({ error: error.message }, { status:
-404 });
-return NextResponse.json({ area: data });
+  try {
+    const tag = params?.tag?.toString() || '';
+    if (!tag) return json({ ok: false, error: 'tag required' }, 422);
+
+    const supabase = supabaseAnon();
+    const { data, error } = await supabase
+      .from('areas')
+      .select('tag,name,display_name,active,*')
+      .eq('tag', tag)
+      .maybeSingle();
+
+    if (error) return json({ ok: false, error: error.message }, 500);
+    if (!data) return json({ ok: false, error: 'Not found' }, 404);
+
+    return json({ ok: true, item: data }, 200);
+  } catch (e) {
+    return json({ ok: false, error: e?.message || 'Unexpected error' }, 500);
+  }
 }
-export async function PATCH(req, { params }) {
-const supabase = createRouteHandlerClient({ cookies });
-const { data: { session } } = await supabase.auth.getSession();
-if (!session) return NextResponse.json({ error: "Not authenticated" }, {
-status: 401 });
-const tag = params?.tag;
-const body = await req.json().catch(() => ({}));
-const patch = {};
-for (const k of ["name","center_lat","center_lng","radius_km","active"]) if
-(k in body) patch[k] = body[k];
-const { error } = await
-supabase.from("service_areas").update(patch).eq("tag", tag);
-if (error) return NextResponse.json({ error: error.message }, { status:
-400 });
-return NextResponse.json({ ok: true });
-}
-export async function DELETE(_req, { params }) {
-const supabase = createRouteHandlerClient({ cookies });
-const { data: { session } } = await supabase.auth.getSession();
-if (!session) return NextResponse.json({ error: "Not authenticated" }, {
-status: 401 });
-const tag = params?.tag;
-const { error } = await supabase.from("service_areas").delete().eq("tag",
-tag);
-if (error) return NextResponse.json({ error: error.message }, { status:
-400 });
-return NextResponse.json({ ok: true });
-} 
