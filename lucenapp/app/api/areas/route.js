@@ -19,16 +19,11 @@ export async function GET(req) {
     const fields = (url.searchParams.get('fields') || 'basic').toLowerCase();
     const activeParam = url.searchParams.get('active');
     const wantActive = activeParam == null ? null : /^(1|true|yes)$/i.test(activeParam);
-    const rawLimit = parseInt(url.searchParams.get('limit') ?? '100', 10);
-    const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 500) : 100;
+    const rawLimit = parseInt(url.searchParams.get('limit') ?? '200', 10);
+    const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 500) : 200;
 
     const supabase = supabaseAnon();
-
-    // Select a conservative set of columns that are likely to exist.
-    // (No display_name here, since your table doesn’t have it.)
-    const selectCols = fields === 'all'
-      ? '*'
-      : 'tag,name,active';
+    const selectCols = fields === 'all' ? '*' : 'tag,name,state';
 
     const { data, error } = await supabase
       .from('areas')
@@ -42,19 +37,25 @@ export async function GET(req) {
 
     let items = Array.isArray(data) ? data : [];
 
-    // JS-filter active if requested and column exists
-    if (wantActive !== null && items.length && Object.hasOwn(items[0], 'active')) {
-      items = items.filter(a => !!a.active === wantActive);
+    // Map to a consistent shape
+    items = items.map((a) => {
+      const active = (a.state ?? '').toString().toLowerCase() === 'active';
+      return {
+        tag: String(a.tag),
+        name: a.name ?? String(a.tag),
+        active,
+        ...(fields === 'all' ? { state: a.state } : {}),
+      };
+    });
+
+    // If active filter requested, apply it
+    if (wantActive !== null) {
+      items = items.filter((a) => a.active === wantActive);
     }
 
-    // When fields=basic, trim to a small shape with robust fallbacks for name.
+    // Trim to basic if requested
     if (fields !== 'all') {
-      items = items.map(a => ({
-        tag: a.tag,
-        // fallbacks in case your schema uses a different label column
-        name: a.name ?? a.title ?? a.label ?? a.tag,
-        active: Object.hasOwn(a, 'active') ? !!a.active : true,
-      }));
+      items = items.map(({ tag, name, active }) => ({ tag, name, active }));
     }
 
     return NextResponse.json({ ok: true, items }, { status: 200 });
