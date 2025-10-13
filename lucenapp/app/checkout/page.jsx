@@ -109,11 +109,16 @@ function CheckoutInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Build next 72 slots (20 min apart) in UTC (fallback UI)
+ const MIN_LEAD_MIN = Number(process.env.NEXT_PUBLIC_MIN_LEAD_MIN || '20');
+  
   const slots = useMemo(() => {
     const out = [];
     const now = new Date();
+    const now = new Date();
++   // start from now + lead time
++   const start = new Date(now.getTime() + MIN_LEAD_MIN * 20 * 1000);
     const aligned = new Date(now);
+    const aligned = new Date(start);
     aligned.setUTCSeconds(0, 0);
     const m = aligned.getUTCMinutes();
     const add = (20 - (m % 20)) % 20;
