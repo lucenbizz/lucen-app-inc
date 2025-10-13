@@ -45,6 +45,7 @@ function CheckoutInner() {
     (async () => {
       try {
         const res = await fetch('/api/loyalty/summary', { cache: 'no-store' });
+        if (res.status === 401) { setBalance(0); return; }
         if (!res.ok) return;
         const json = await res.json();
         setBalance(json?.summary?.points_balance || 0);
@@ -62,10 +63,10 @@ function CheckoutInner() {
   const [reservation, setReservation] = useState(null);
   const [countdown, setCountdown] = useState(0);
   const [intent, setIntent] = useState(null); // { provider, clientSecret, amountCents, paymentIntentId }
-  const [creating, setCreating] = useState(false); // NEW: disable button during request
-  const abortRef = useRef(null); // NEW: prevent parallel fetches
+  const [creating, setCreating] = useState(false);
+  const abortRef = useRef(null);
 
-  // Areas & Slot (prefill from Plans)
+  // Areas & Slot
   const [areas, setAreas] = useState([]);
   const [areaTag, setAreaTag] = useState('');
   const [slotAt, setSlotAt] = useState('');
@@ -82,7 +83,12 @@ function CheckoutInner() {
         const areaParam = params.get('area');
         if (areaParam) setAreaTag(areaParam);
         else if (items.length) setAreaTag(items[0].tag);
-      } catch {}
+        else setAreaTag('');
+      } catch (e) {
+        console.error('/api/areas fetch failed', e);
+        setAreas([]);
+        setAreaTag('');
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -109,24 +115,25 @@ function CheckoutInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
- const MIN_LEAD_MIN = Number(process.env.NEXT_PUBLIC_MIN_LEAD_MIN || '20');
-  
+  // --- Lead time (keep at 20 minutes as requested) ---
+  const MIN_LEAD_MIN = Number(process.env.NEXT_PUBLIC_MIN_LEAD_MIN || '20');
+
+  // Build next 72 slots (20 min apart) in UTC, starting after lead time
   const slots = useMemo(() => {
     const out = [];
     const now = new Date();
-   // start from now + lead time
-    const start = new Date(now.getTime() + MIN_LEAD_MIN * 20 * 1000);
+    const start = new Date(now.getTime() + MIN_LEAD_MIN * 60 * 1000); // 20 min lead
     const aligned = new Date(start);
     aligned.setUTCSeconds(0, 0);
     const m = aligned.getUTCMinutes();
     const add = (20 - (m % 20)) % 20;
     aligned.setUTCMinutes(m + add);
     for (let i = 0; i < 72; i++) {
-      const d = new Date(aligned.getTime() + i * 20 * 20 * 1000);
+      const d = new Date(aligned.getTime() + i * 20 * 60 * 1000);
       out.push({ iso: d.toISOString(), label: humanUTC(d) });
     }
     return out;
-  }, []);
+  }, [MIN_LEAD_MIN]);
   useEffect(() => { if (!slotAt && slots.length) setSlotAt(slots[0].iso); }, [slots, slotAt]);
 
   // Loyalty reservation
@@ -171,115 +178,116 @@ function CheckoutInner() {
       return false;
     }
   }
-  // Helper to ask the backend if the slot is valid (and get suggested slots)
-async function prevalidateSlot(areaTag, slotIso) {
-  try {
-    const res = await fetch('/api/areas/validate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      cache: 'no-store',
-      body: JSON.stringify({ area_tag: areaTag, delivery_slot_at: slotIso }),
-    });
-    const json = await res.json().catch(() => ({}));
-    return { ok: res.ok && json?.ok, status: res.status, ...json };
-  } catch (e) {
-    return { ok: false, error: e?.message || 'Network error' };
-  }
-}
 
-async function createIntent() {
-  if (!areaTag) return alert('Choose a service area first.');
-  if (!slotAt) return alert('Choose a delivery time slot first.');
-  if (!isTwentyMinuteBoundary(slotAt)) {
-    return alert('Time slot must land on a 20-minute boundary (e.g., 10:00, 10:20, 10:40 UTC).');
-  }
-
-  // Preflight backend validator to avoid 409s and auto-advance if needed
-  const pv = await prevalidateSlot(areaTag, slotAt);
-  if (!pv.ok) {
-    if (pv?.nextSlots?.length) {
-      const next = pv.nextSlots[0];
-      setSlotAt(next);
-      alert(
-        pv.code === 'LEAD_TIME_TOO_SOON'
-          ? `That time is too soon. I moved you to the next available slot: ${humanUTC(new Date(next))}`
-          : pv.error || 'Adjusted to the next available slot.'
-      );
-    } else {
-      alert(pv?.error || 'Selected time is not available for this area. Please choose another.');
+  async function prevalidateSlot(areaTag, slotIso) {
+    try {
+      const res = await fetch('/api/areas/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({ area_tag: areaTag, delivery_slot_at: slotIso }),
+      });
+      const json = await res.json().catch(() => ({}));
+      return { ok: res.ok && json?.ok, status: res.status, ...json };
+    } catch (e) {
+      return { ok: false, error: e?.message || 'Network error' };
     }
-    return;
   }
 
-  // Prevent parallel POSTs (uses the abortRef and setCreating you already added)
-  if (abortRef.current) abortRef.current.abort();
-  abortRef.current = new AbortController();
-  const timeoutId = setTimeout(() => abortRef.current?.abort(), 15000);
+  async function createIntent() {
+    if (!areaTag) return alert('Choose a service area first.');
+    if (!slotAt) return alert('Choose a delivery time slot first.');
+    if (!isTwentyMinuteBoundary(slotAt)) {
+      return alert('Time slot must land on a 20-minute boundary (e.g., 10:00, 10:20, 10:40 UTC).');
+    }
 
-  try {
-    setCreating(true);
-
-    const res = await fetch('/api/payments/intent', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      cache: 'no-store',
-      signal: abortRef.current.signal,
-      body: JSON.stringify({
-        area_tag: areaTag,
-        delivery_slot_at: slotAt,
-        cartTotalCents,
-        reservationId: reservation?.id || null,
-        orderTempId,
-        tier,
-      })
-    });
-
-    const json = await res.json().catch(() => ({}));
-
-    if (!res.ok) {
-      switch (res.status) {
-        case 401:
-          alert('Please sign in to continue.');
-          break;
-        case 422:
-          alert(json?.error || 'Some required fields are missing or invalid.');
-          break;
-        case 409:
-          if (json?.code === 'DELIVERY_UNAVAILABLE' || json?.code === 'LEAD_TIME_TOO_SOON' || json?.code === 'SLOT_NOT_ALIGNED') {
-            if (json?.nextSlots?.length) {
-              const next = json.nextSlots[0];
-              setSlotAt(next);
-              alert(json?.error || `Adjusted to the next available slot: ${humanUTC(new Date(next))}`);
-            } else {
-              alert(json?.reason || json?.error || 'Delivery not available for this selection.');
-            }
-          } else {
-            alert(json?.error || 'Conflict. Please try again.');
-          }
-          break;
-        default:
-          alert(json?.error || `Failed to create/update payment intent (status ${res.status}).`);
+    // Preflight backend validator to avoid 409s and auto-advance if needed
+    const pv = await prevalidateSlot(areaTag, slotAt);
+    if (!pv.ok) {
+      if (pv?.nextSlots?.length) {
+        const next = pv.nextSlots[0];
+        setSlotAt(next);
+        alert(
+          pv.code === 'LEAD_TIME_TOO_SOON'
+            ? `That time is too soon. I moved you to the next available slot: ${humanUTC(new Date(next))}`
+            : pv.error || 'Adjusted to the next available slot.'
+        );
+      } else {
+        alert(pv?.error || 'Selected time is not available for this area. Please choose another.');
       }
       return;
     }
 
-    setIntent(json);
-    try { if (json?.clientSecret) localStorage.setItem('lastClientSecret', json.clientSecret); } catch {}
-  } catch (e) {
-    if (e?.name !== 'AbortError') alert(e?.message || 'Network error while creating payment intent.');
-  } finally {
-    clearTimeout(timeoutId);
-    setCreating(false);
-    abortRef.current = null;
+    // Prevent parallel POSTs
+    if (abortRef.current) abortRef.current.abort();
+    abortRef.current = new AbortController();
+    const timeoutId = setTimeout(() => abortRef.current?.abort(), 15000);
+
+    try {
+      setCreating(true);
+
+      const res = await fetch('/api/payments/intent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        cache: 'no-store',
+        signal: abortRef.current.signal,
+        body: JSON.stringify({
+          area_tag: areaTag,
+          delivery_slot_at: slotAt,
+          cartTotalCents,
+          reservationId: reservation?.id || null,
+          orderTempId,
+          tier,
+        })
+      });
+
+      const json = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        switch (res.status) {
+          case 401:
+            alert('Please sign in to continue.');
+            break;
+          case 422:
+            alert(json?.error || 'Some required fields are missing or invalid.');
+            break;
+          case 409:
+            if (json?.code === 'DELIVERY_UNAVAILABLE' || json?.code === 'LEAD_TIME_TOO_SOON' || json?.code === 'SLOT_NOT_ALIGNED') {
+              if (json?.nextSlots?.length) {
+                const next = json.nextSlots[0];
+                setSlotAt(next);
+                alert(json?.error || `Adjusted to the next available slot: ${humanUTC(new Date(next))}`);
+              } else {
+                alert(json?.reason || json?.error || 'Delivery not available for this selection.');
+              }
+            } else {
+              alert(json?.error || 'Conflict. Please try again.');
+            }
+            break;
+          default:
+            alert(json?.error || `Failed to create/update payment intent (status ${res.status}).`);
+        }
+        return;
+      }
+
+      setIntent(json);
+      try { if (json?.clientSecret) localStorage.setItem('lastClientSecret', json.clientSecret); } catch {}
+    } catch (e) {
+      if (e?.name !== 'AbortError') alert(e?.message || 'Network error while creating payment intent.');
+    } finally {
+      clearTimeout(timeoutId);
+      setCreating(false);
+      abortRef.current = null;
+    }
   }
-}
+
   // Confirm payment (Stripe Elements)
   const canRenderElements = !!(intent?.provider === 'stripe' && intent?.clientSecret && process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY);
   const discountCents = reservation?.valueCents || 0;
   const totalCents = Math.max(0, cartTotalCents - discountCents);
   const willEarn = pointsFor(totalCents, tier);
 
-  // Reset on tier change (keep intent if it matches new tier only if you want)
+  // Reset on tier change
   useEffect(() => { setRedeemPts(0); setReservation(null); }, [tier]);
 
   return (
@@ -320,26 +328,31 @@ async function createIntent() {
                 <option key={a.tag} value={a.tag}>{a.name}</option>
               ))}
             </select>
+            {!areas.length && (
+              <p className="mt-1 text-xs text-red-600">
+                No areas available. Make sure your <code>areas</code> table has rows or that <code>/api/areas</code> is configured.
+              </p>
+            )}
           </label>
 
-        <label className="block">
-          <div className="text-sm font-semibold mb-1">Delivery time (20-min slots, UTC)</div>
-          <select
-            value={slotAt}
-            onChange={(e)=>setSlotAt(e.target.value)}
-            className="w-full rounded-xl bg-white border px-3 py-2"
-          >
-            {slots.map(s => (
-              <option key={s.iso} value={s.iso}>{s.label}</option>
-            ))}
-          </select>
-        </label>
-      </div>
+          <label className="block">
+            <div className="text-sm font-semibold mb-1">Delivery time (20-min slots, UTC)</div>
+            <select
+              value={slotAt}
+              onChange={(e)=>setSlotAt(e.target.value)}
+              className="w-full rounded-xl bg-white border px-3 py-2"
+            >
+              {slots.map(s => (
+                <option key={s.iso} value={s.iso}>{s.label}</option>
+              ))}
+            </select>
+          </label>
+        </div>
 
-      <div className="text-xs text-gray-600">
-        Selected: area=<code>{areaTag || '—'}</code>, slot=<code>{slotAt || '—'}</code>
+        <div className="text-xs text-gray-600">
+          Selected: area=<code>{areaTag || '—'}</code>, slot=<code>{slotAt || '—'}</code>
+        </div>
       </div>
-    </div>
 
       {/* Summary + Loyalty */}
       <div className="border rounded-2xl p-4 space-y-2">
@@ -388,15 +401,13 @@ async function createIntent() {
         </Elements>
       ) : (
         <div className="flex items-center justify-end gap-2">
-          {!intent?.paymentIntentId && (
-            <button
-              onClick={createIntent}
-              disabled={creating}
-              className="border rounded-xl px-4 py-2 hover:shadow disabled:opacity-50"
-            >
-              {creating ? 'Creating…' : 'Create Payment Intent'}
-            </button>
-          )}
+          <button
+            onClick={createIntent}
+            disabled={creating}
+            className="border rounded-xl px-4 py-2 hover:shadow disabled:opacity-50"
+          >
+            {creating ? 'Creating…' : (intent?.paymentIntentId ? 'Recreate Payment Intent' : 'Create Payment Intent')}
+          </button>
           {!process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY && (
             <p className="text-xs text-gray-500">
               Set <code>NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY</code> to render the payment form.
@@ -424,12 +435,11 @@ function StripeForm() {
     const { error } = await stripe.confirmPayment({
       elements,
       confirmParams: {
-        // Optional: redirect to a receipt page that reads PI from query
         return_url: typeof window !== 'undefined'
           ? `${window.location.origin}/checkout/thank-you`
           : undefined,
       },
-      redirect: 'if_required', // allow in-page confirmations (US cards)
+      redirect: 'if_required',
     });
 
     if (error) {
