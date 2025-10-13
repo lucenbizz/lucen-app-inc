@@ -115,8 +115,8 @@ function CheckoutInner() {
     const out = [];
     const now = new Date();
     const now = new Date();
-+   // start from now + lead time
-+   const start = new Date(now.getTime() + MIN_LEAD_MIN * 20 * 1000);
+   // start from now + lead time
+    const start = new Date(now.getTime() + MIN_LEAD_MIN * 20 * 1000);
     const aligned = new Date(now);
     const aligned = new Date(start);
     aligned.setUTCSeconds(0, 0);
