@@ -26,6 +26,7 @@ export async function GET(req, { params }) {
     if (!tag) return json({ ok: false, error: 'tag required' }, 422);
 
     const url = new URL(req.url);
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const fields = (url.searchParams.get('fields') || 'basic').toLowerCase();
 
     const sb = supabaseAnon();
