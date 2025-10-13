@@ -8,73 +8,43 @@ import { createRouteHandlerClient } from '@supabase/auth-helpers-nextjs';
 import Stripe from 'stripe';
 import crypto from 'node:crypto';
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
-  apiVersion: '2024-06-20',
-});
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: '2024-06-20' });
 
-/* ========= helpers ========= */
 function jsonError(msg, status = 400, extra = {}) {
   return NextResponse.json({ ok: false, error: msg, ...extra }, { status });
 }
-function isIsoDate(s) {
-  if (!s || typeof s !== 'string') return false;
-  const d = new Date(s);
-  return !Number.isNaN(d.getTime());
-}
-function is20MinBoundary(iso) {
-  const d = new Date(iso);
-  return d.getUTCSeconds() === 0 && d.getUTCMilliseconds() === 0 && d.getUTCMinutes() % 20 === 0;
-}
-function cents(n) {
-  const x = Number(n);
-  return Number.isFinite(x) ? Math.max(0, Math.round(x)) : 0;
-}
+function isIsoDate(s) { if (!s || typeof s !== 'string') return false; const d = new Date(s); return !Number.isNaN(d.getTime()); }
+function is20MinBoundary(iso) { const d = new Date(iso); return d.getUTCSeconds() === 0 && d.getUTCMilliseconds() === 0 && d.getUTCMinutes() % 20 === 0; }
+function cents(n) { const x = Number(n); return Number.isFinite(x) ? Math.max(0, Math.round(x)) : 0; }
 function stableKeyFromOrder(orderTempId) {
-  // A short stable key for the FIRST create only (not updates)
   const base = orderTempId || 'noorder';
   return 'intent_' + crypto.createHash('sha256').update(base).digest('hex').slice(0, 16);
 }
 
-/* ========= handler ========= */
 export async function POST(req) {
   try {
     const body = await req.json().catch(() => ({}));
 
-    // Accept common aliases
     const area_tag = (body.area_tag ?? body.areaTag ?? body.area ?? '').toString().trim();
-    const delivery_slot_at = (
-      body.delivery_slot_at ??
-      body.deliverySlotAt ??
-      body.slotAt ??
-      body.slot ??
-      ''
-    ).toString().trim();
+    const delivery_slot_at = (body.delivery_slot_at ?? body.deliverySlotAt ?? body.slotAt ?? body.slot ?? '').toString().trim();
     const cartTotalCents = cents(body.cartTotalCents ?? body.totalCents ?? body.amount ?? 0);
-    const reservationId =
-      typeof body.reservationId === 'string' && body.reservationId.trim()
-        ? body.reservationId.trim()
-        : null;
-    const orderTempId =
-      typeof body.orderTempId === 'string' && body.orderTempId.trim()
-        ? body.orderTempId.trim()
-        : null;
+    const reservationId = typeof body.reservationId === 'string' && body.reservationId.trim() ? body.reservationId.trim() : null;
+    const orderTempId = typeof body.orderTempId === 'string' && body.orderTempId.trim() ? body.orderTempId.trim() : null;
     const purchaseTier = (body.tier || body.purchaseTier || '').toString();
 
     if (!area_tag) return jsonError('area_tag is required', 422, { field: 'area_tag' });
-    if (!isIsoDate(delivery_slot_at))
-      return jsonError('delivery_slot_at must be an ISO datetime', 422, { field: 'delivery_slot_at' });
-    if (!is20MinBoundary(delivery_slot_at))
-      return jsonError('Slot must be on a 20-minute boundary (e.g., 10:00, 10:20, 10:40 UTC)', 422, { field: 'delivery_slot_at' });
+    if (!isIsoDate(delivery_slot_at)) return jsonError('delivery_slot_at must be an ISO datetime', 422, { field: 'delivery_slot_at' });
+    if (!is20MinBoundary(delivery_slot_at)) return jsonError('Slot must be on a 20-minute boundary (e.g., 10:00, 10:20, 10:40 UTC)', 422, { field: 'delivery_slot_at' });
     if (!cartTotalCents) return jsonError('cartTotalCents is required', 422, { field: 'cartTotalCents' });
 
-    // ✅ Supabase user
-    const store = cookies(); // (no await needed)
+    // Supabase session
+    const store = cookies();
     const supabase = createRouteHandlerClient({ cookies: () => store });
     const { data: { user }, error: meErr } = await supabase.auth.getUser();
     if (meErr || !user?.id) return jsonError('Not signed in', 401, { code: 'AUTH_REQUIRED' });
     const uid = user.id;
 
-    // HARD GATE: coverage validation
+    // Validate coverage
     const origin = process.env.NEXT_PUBLIC_APP_ORIGIN || req.nextUrl.origin;
     const v = await fetch(`${origin}/api/areas/validate`, {
       method: 'POST',
@@ -84,14 +54,15 @@ export async function POST(req) {
     });
     const vj = await v.json().catch(() => ({}));
     if (!v.ok || !vj?.ok) {
-      // keep 409 for “business conflict” but include a clear reason
       return jsonError(vj?.error || 'Delivery not available for this area/slot', 409, {
-        code: 'DELIVERY_UNAVAILABLE',
-        reason: vj?.reason ?? null,
+        code: vj?.code || 'DELIVERY_UNAVAILABLE',
+        reason: vj?.reason,
+        nextSlots: vj?.nextSlots,
+        debug: vj?.debug, // ← SEE EXACT CAUSE IN NETWORK RESPONSE (esp. on preview)
       });
     }
 
-    // Optional loyalty reservation check → compute discountCents
+    // Optional loyalty reservation
     let discountCents = 0;
     if (reservationId) {
       const { data: rsv, error: rErr } = await supabase
@@ -115,43 +86,15 @@ export async function POST(req) {
 
     const amountCents = Math.max(0, cartTotalCents - discountCents);
 
-    // ---------- Stripe PaymentIntent: reuse/update instead of always creating ----------
+    // Reuse/update PI when possible
     const cookieName = orderTempId ? `pi_${orderTempId}` : 'payment_intent_id';
     const existingPiId = store.get(cookieName)?.value || null;
-
     let intent = null;
 
     try {
       if (existingPiId) {
         const current = await stripe.paymentIntents.retrieve(existingPiId);
-
-        // Updatable states
-        if (
-          current.status === 'requires_payment_method' ||
-          current.status === 'requires_confirmation'
-        ) {
-          intent = await stripe.paymentIntents.update(existingPiId, {
-            amount: amountCents,
-            currency: 'usd',
-            metadata: {
-              ...current.metadata,
-              user_id: uid,
-              area_tag,
-              delivery_slot_at,
-              order_temp_id: orderTempId || '',
-              reservation_id: reservationId || '',
-              purchase_tier: purchaseTier,
-              discount_cents: String(discountCents || 0),
-            },
-          });
-        } else if (
-          current.status === 'canceled' ||
-          current.status === 'succeeded' ||
-          current.status === 'requires_capture'
-        ) {
-          // Not safe to update — fall through to create a new one
-        } else {
-          // Fallback: try to update anyway
+        if (current.status === 'requires_payment_method' || current.status === 'requires_confirmation') {
           intent = await stripe.paymentIntents.update(existingPiId, {
             amount: amountCents,
             currency: 'usd',
@@ -168,12 +111,11 @@ export async function POST(req) {
           });
         }
       }
-    } catch (e) {
-      // If retrieving/updating the old PI fails (e.g., no longer exists), proceed to create below
+    } catch {
+      // ignore; we'll create new
     }
 
     if (!intent) {
-      // First create for this order/session with a STABLE idempotency key (not tied to amount)
       const idem = stableKeyFromOrder(orderTempId || '');
       intent = await stripe.paymentIntents.create(
         {
@@ -194,23 +136,21 @@ export async function POST(req) {
       );
     }
 
-    const res = NextResponse.json(
-      {
-        ok: true,
-        provider: 'stripe',
-        amountCents,
-        discountCents,
-        paymentIntentId: intent.id,
-        clientSecret: intent.client_secret,
-        area_tag,
-        delivery_slot_at,
-        orderTempId: orderTempId || null,
-        validation: vj?.reason || 'validated',
-      },
-      { status: 200 }
-    );
+    const res = NextResponse.json({
+      ok: true,
+      provider: 'stripe',
+      amountCents,
+      discountCents,
+      paymentIntentId: intent.id,
+      clientSecret: intent.client_secret,
+      area_tag,
+      delivery_slot_at,
+      orderTempId: orderTempId || null,
+      validation: vj?.reason || 'validated',
+      debug: vj?.debug // helpful in preview
+    });
 
-    // Persist PI id for this order/session
+    // Persist PI id (httpOnly cookie)
     res.cookies.set(cookieName, intent.id, {
       httpOnly: true,
       sameSite: 'lax',
@@ -221,7 +161,6 @@ export async function POST(req) {
 
     return res;
   } catch (e) {
-    // If Stripe sends a conflict, try to recover by returning the last PI in the cookie
     const store = cookies();
     const piFallback =
       store.get('payment_intent_id')?.value ||
@@ -230,16 +169,13 @@ export async function POST(req) {
     if (e?.statusCode === 409 && piFallback) {
       try {
         const existing = await stripe.paymentIntents.retrieve(piFallback);
-        return NextResponse.json(
-          {
-            ok: true,
-            recovered: true,
-            paymentIntentId: existing.id,
-            clientSecret: existing.client_secret,
-            status: existing.status,
-          },
-          { status: 200 }
-        );
+        return NextResponse.json({
+          ok: true,
+          recovered: true,
+          paymentIntentId: existing.id,
+          clientSecret: existing.client_secret,
+          status: existing.status,
+        });
       } catch {}
     }
 
