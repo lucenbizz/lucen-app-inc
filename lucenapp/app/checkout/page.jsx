@@ -114,7 +114,6 @@ function CheckoutInner() {
   const slots = useMemo(() => {
     const out = [];
     const now = new Date();
-    const now = new Date();
    // start from now + lead time
     const start = new Date(now.getTime() + MIN_LEAD_MIN * 20 * 1000);
     const aligned = new Date(now);
