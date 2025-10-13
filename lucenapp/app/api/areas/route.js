@@ -5,82 +5,77 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
-/** Helpers */
-function jsonError(msg, status = 400) {
-  return NextResponse.json({ error: msg }, { status });
-}
-function toBool(v, dflt = true) {
-  if (v === null || v === undefined) return dflt;
-  const s = String(v).toLowerCase();
-  if (['1', 'true', 'yes', 'on'].includes(s)) return true;
-  if (['0', 'false', 'no', 'off'].includes(s)) return false;
-  return dflt;
-}
-function safeInt(v, dflt, min, max) {
-  const n = parseInt(v, 10);
-  if (Number.isNaN(n)) return dflt;
-  return Math.min(max, Math.max(min, n));
+function json(data, status = 200) {
+  return NextResponse.json(data, { status });
 }
 
-/** GET /api/areas
- * Query:
- *   - fields=basic|full   (default basic)
- *   - active=true|false|all (default true)
- *   - q=search text       (optional)
- *   - limit=1..500        (default 200)
+function supabaseAnon() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+    { auth: { persistSession: false, autoRefreshToken: false } }
+  );
+}
+
+/**
+ * GET /api/areas?fields=basic|all&active=true|false&limit=50
+ * Returns: { items: [...] }
  *
- * Responses:
- *   { items: [{ tag, name }] }                       // fields=basic
- *   { items: [{ tag, name, state, center_lat, center_lng, radius_km, active }] } // fields=full
+ * - fields=basic -> tag, name (and display_name if present)
+ * - fields=all   -> *
+ * - active=true  -> filters to active areas *if column exists* (otherwise we filter in JS)
  */
 export async function GET(req) {
   try {
-    const { searchParams } = new URL(req.url);
-    const fields = (searchParams.get('fields') || 'basic').toLowerCase();
-    const activeParam = searchParams.get('active'); // 'true' | 'false' | 'all'
-    const limit = safeInt(searchParams.get('limit'), 200, 1, 500);
-    const q = (searchParams.get('q') || '').trim();
+    const url = new URL(req.url);
+    const fields = (url.searchParams.get('fields') || 'basic').toLowerCase();
+    const activeParam = url.searchParams.get('active');
+    const wantActive = activeParam == null ? null : /^(1|true|yes)$/i.test(activeParam);
+    const rawLimit = parseInt(url.searchParams.get('limit') ?? '100', 10);
+    const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 500) : 100;
 
-    const SUPABASE_URL = (process.env.NEXT_PUBLIC_SUPABASE_URL || '').replace(/\/+$/, '');
-    const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
-    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-      return jsonError('Server missing Supabase env', 500);
+    const supabase = supabaseAnon();
+
+    // Pick columns
+    let columns;
+    if (fields === 'all') {
+      columns = '*';
+    } else {
+      // keep it small; include display_name if your table has it
+      columns = 'tag,name,display_name,active';
     }
 
-    // Plain anon client — relies on RLS to allow anon+authenticated SELECT active=true
-    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    });
-
-    const fullCols = 'tag, name, state, center_lat, center_lng, radius_km, active';
-    const basicCols = 'tag, name';
-    const cols = fields === 'full' ? fullCols : basicCols;
-
-    let qy = supabase
+    // Do a broad select; we’ll JS-filter active if the column exists
+    const { data, error } = await supabase
       .from('areas')
-      .select(cols)
-      .order('state', { ascending: true })
+      .select(columns)
       .order('name', { ascending: true })
       .limit(limit);
 
-    if (activeParam !== 'all') {
-      qy = qy.eq('active', toBool(activeParam, true));
+    if (error) return json({ ok: false, error: error.message }, 500);
+
+    let items = Array.isArray(data) ? data : [];
+
+    // If caller asked for active=true/false and we have an 'active' field, filter in JS.
+    if (wantActive !== null && items.length && Object.hasOwn(items[0], 'active')) {
+      items = items.filter(a => !!a.active === wantActive);
     }
 
-    if (q) {
-      qy = qy.or(`tag.ilike.%${q}%,name.ilike.%${q}%`);
+    // Trim to "basic" if caller asked for basic but table returned extra
+    if (fields !== 'all') {
+      items = items.map(a => ({
+        tag: a.tag,
+        name: a.name ?? a.display_name ?? a.tag,
+        active: Object.hasOwn(a, 'active') ? !!a.active : true,
+      }));
     }
 
-    const { data, error } = await qy;
-    if (error) return jsonError(error.message || 'Failed to load areas', 500);
-
-    if (fields === 'full') {
-      return NextResponse.json({ items: data || [] });
-    }
-    return NextResponse.json({
-      items: (data || []).map((r) => ({ tag: r.tag, name: r.name })),
-    });
+    return json({ ok: true, items }, 200);
   } catch (e) {
-    return jsonError((e && e.message) || 'Unexpected error', 500);
+    return json({ ok: false, error: e?.message || 'Failed to list areas' }, 500);
   }
+}
+
+export async function POST() {
+  return NextResponse.json({ ok: false, error: 'Method Not Allowed' }, { status: 405 });
 }
