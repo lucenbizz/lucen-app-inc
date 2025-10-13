@@ -122,7 +122,7 @@ function CheckoutInner() {
     const add = (20 - (m % 20)) % 20;
     aligned.setUTCMinutes(m + add);
     for (let i = 0; i < 72; i++) {
-      const d = new Date(aligned.getTime() + i * 20 * 60 * 1000);
+      const d = new Date(aligned.getTime() + i * 20 * 20 * 1000);
       out.push({ iso: d.toISOString(), label: humanUTC(d) });
     }
     return out;
@@ -171,83 +171,108 @@ function CheckoutInner() {
       return false;
     }
   }
+  // Helper to ask the backend if the slot is valid (and get suggested slots)
+async function prevalidateSlot(areaTag, slotIso) {
+  try {
+    const res = await fetch('/api/areas/validate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      cache: 'no-store',
+      body: JSON.stringify({ area_tag: areaTag, delivery_slot_at: slotIso }),
+    });
+    const json = await res.json().catch(() => ({}));
+    return { ok: res.ok && json?.ok, status: res.status, ...json };
+  } catch (e) {
+    return { ok: false, error: e?.message || 'Network error' };
+  }
+}
 
-  // Create (or recreate/update) intent from Checkout (if Plans wasn’t used)
-  async function createIntent() {
-    if (!areaTag) return alert('Choose a service area first.');
-    if (!slotAt) return alert('Choose a delivery time slot first.');
-    if (!isTwentyMinuteBoundary(slotAt)) {
-      return alert('Time slot must land on a 20-minute boundary (e.g., 10:00, 10:20, 10:40 UTC).');
-    }
-    if (!cartTotalCents || cartTotalCents < 50) {
-      return alert('Cart total must be at least $0.50.');
-    }
-
-    // Prevent parallel POSTs
-    if (abortRef.current) abortRef.current.abort();
-    abortRef.current = new AbortController();
-    const timeoutId = setTimeout(() => abortRef.current?.abort(), 15000);
-
-    try {
-      setCreating(true);
-
-      const res = await fetch('/api/payments/intent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-        cache: 'no-store',
-        signal: abortRef.current.signal,
-        body: JSON.stringify({
-          area_tag: areaTag,
-          delivery_slot_at: slotAt,
-          cartTotalCents,
-          reservationId: reservation?.id || null,
-          orderTempId,
-          tier,
-        })
-      });
-
-      const json = await res.json().catch(() => ({}));
-
-      if (!res.ok) {
-        switch (res.status) {
-          case 401:
-            alert('Please sign in to continue.');
-            break;
-          case 422:
-            alert(json?.error || 'Some required fields are missing or invalid.');
-            break;
-          case 409:
-            if (json?.code === 'DELIVERY_UNAVAILABLE') {
-              alert(json?.reason || 'Delivery not available for this area/slot. Please choose another time.');
-            } else if (json?.code?.startsWith?.('RSV_')) {
-              alert(json?.error || 'There was a problem with your reservation.');
-            } else {
-              alert(json?.error || 'Conflict. Please try again.');
-            }
-            break;
-          default:
-            alert(json?.error || `Failed to create/update payment intent (status ${res.status}).`);
-        }
-        return;
-      }
-
-      // Success
-      setIntent(json);
-      try {
-        if (json?.clientSecret) {
-          localStorage.setItem('lastClientSecret', json.clientSecret);
-        }
-      } catch {}
-    } catch (e) {
-      if (e?.name === 'AbortError') return; // superseded by a newer click
-      alert(e?.message || 'Network error while creating payment intent.');
-    } finally {
-      clearTimeout(timeoutId);
-      setCreating(false);
-      abortRef.current = null;
-    }
+async function createIntent() {
+  if (!areaTag) return alert('Choose a service area first.');
+  if (!slotAt) return alert('Choose a delivery time slot first.');
+  if (!isTwentyMinuteBoundary(slotAt)) {
+    return alert('Time slot must land on a 20-minute boundary (e.g., 10:00, 10:20, 10:40 UTC).');
   }
 
+  // Preflight backend validator to avoid 409s and auto-advance if needed
+  const pv = await prevalidateSlot(areaTag, slotAt);
+  if (!pv.ok) {
+    if (pv?.nextSlots?.length) {
+      const next = pv.nextSlots[0];
+      setSlotAt(next);
+      alert(
+        pv.code === 'LEAD_TIME_TOO_SOON'
+          ? `That time is too soon. I moved you to the next available slot: ${humanUTC(new Date(next))}`
+          : pv.error || 'Adjusted to the next available slot.'
+      );
+    } else {
+      alert(pv?.error || 'Selected time is not available for this area. Please choose another.');
+    }
+    return;
+  }
+
+  // Prevent parallel POSTs (uses the abortRef and setCreating you already added)
+  if (abortRef.current) abortRef.current.abort();
+  abortRef.current = new AbortController();
+  const timeoutId = setTimeout(() => abortRef.current?.abort(), 15000);
+
+  try {
+    setCreating(true);
+
+    const res = await fetch('/api/payments/intent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      cache: 'no-store',
+      signal: abortRef.current.signal,
+      body: JSON.stringify({
+        area_tag: areaTag,
+        delivery_slot_at: slotAt,
+        cartTotalCents,
+        reservationId: reservation?.id || null,
+        orderTempId,
+        tier,
+      })
+    });
+
+    const json = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      switch (res.status) {
+        case 401:
+          alert('Please sign in to continue.');
+          break;
+        case 422:
+          alert(json?.error || 'Some required fields are missing or invalid.');
+          break;
+        case 409:
+          if (json?.code === 'DELIVERY_UNAVAILABLE' || json?.code === 'LEAD_TIME_TOO_SOON' || json?.code === 'SLOT_NOT_ALIGNED') {
+            if (json?.nextSlots?.length) {
+              const next = json.nextSlots[0];
+              setSlotAt(next);
+              alert(json?.error || `Adjusted to the next available slot: ${humanUTC(new Date(next))}`);
+            } else {
+              alert(json?.reason || json?.error || 'Delivery not available for this selection.');
+            }
+          } else {
+            alert(json?.error || 'Conflict. Please try again.');
+          }
+          break;
+        default:
+          alert(json?.error || `Failed to create/update payment intent (status ${res.status}).`);
+      }
+      return;
+    }
+
+    setIntent(json);
+    try { if (json?.clientSecret) localStorage.setItem('lastClientSecret', json.clientSecret); } catch {}
+  } catch (e) {
+    if (e?.name !== 'AbortError') alert(e?.message || 'Network error while creating payment intent.');
+  } finally {
+    clearTimeout(timeoutId);
+    setCreating(false);
+    abortRef.current = null;
+  }
+}
   // Confirm payment (Stripe Elements)
   const canRenderElements = !!(intent?.provider === 'stripe' && intent?.clientSecret && process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY);
   const discountCents = reservation?.valueCents || 0;
