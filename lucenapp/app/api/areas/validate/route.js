@@ -14,6 +14,22 @@ function supabaseCookieName() {
     )?.[1] || 'khzbliduummbypuxqnfn';
   return `sb-${ref}-auth-token`;
 }
+function getAccessTokenFromCookies(store) {
+  // 1) Direct helper cookie
+  const direct = store.get('sb-access-token')?.value;
+  if (direct) return direct;
+
+  // 2) Browser cookie: sb-<ref>-auth-token is URL-encoded JSON: [access, refresh]
+  const comboRaw = store.get(supabaseCookieName())?.value;
+  if (comboRaw) {
+    try {
+      const decoded = decodeURIComponent(comboRaw);
+      const arr = JSON.parse(decoded);
+      if (Array.isArray(arr) && typeof arr[0] === 'string' && arr[0]) return arr[0];
+    } catch {}
+  }
+  return null;
+}
 function supabaseWithBearer(token) {
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL,
@@ -24,25 +40,24 @@ function supabaseWithBearer(token) {
     }
   );
 }
-function jsonError(msg, status = 400) {
-  return NextResponse.json({ error: msg }, { status });
+function jsonError(msg, status = 400, extra = {}) {
+  return NextResponse.json({ ok: false, error: msg, ...extra }, { status });
 }
 function isIsoDate(s) {
   if (!s || typeof s !== 'string') return false;
   const d = new Date(s);
   return !Number.isNaN(d.getTime());
 }
-function enforce20MinIncrement(iso) {
+function is20MinBoundary(iso) {
   const d = new Date(iso);
   return d.getUTCMinutes() % 20 === 0 && d.getUTCSeconds() === 0 && d.getUTCMilliseconds() === 0;
 }
 
-/** ===== Core checks =====
+/** ===== New permissive logic =====
  * Validation passes if:
  *   A) There exists an APPROVED delivery_request for (current user, area_tag, delivery_slot_at), OR
- *   B) We can infer radius availability for that area/slot (best-effort):
- *      - area exists and is active; and
- *      - there appears to be at least 1 staff/exec covering this area (via user_areas, or profiles default area, or area capacity fields)
+ *   B) The area **exists** in `areas` (we do NOT check active/coverage/staff anymore).
+ * This effectively makes all currently included areas available for delivery.
  */
 export async function POST(req) {
   try {
@@ -50,102 +65,56 @@ export async function POST(req) {
     const area_tag = (body.area_tag || '').trim();
     const delivery_slot_at = body.delivery_slot_at;
 
-    if (!area_tag) return jsonError('area_tag is required');
-    if (!isIsoDate(delivery_slot_at)) return jsonError('delivery_slot_at must be an ISO datetime');
-    if (!enforce20MinIncrement(delivery_slot_at))
-      return jsonError('Slot must be on a 20-minute boundary (e.g., 10:00, 10:20, 10:40)');
+    if (!area_tag) return jsonError('area_tag is required', 422, { field: 'area_tag' });
+    if (!isIsoDate(delivery_slot_at))
+      return jsonError('delivery_slot_at must be an ISO datetime', 422, { field: 'delivery_slot_at' });
+    if (!is20MinBoundary(delivery_slot_at))
+      return jsonError('Slot must be on a 20-minute boundary (e.g., 10:00, 10:20, 10:40 UTC)', 422, { field: 'delivery_slot_at' });
 
-    const store = await cookies();
-    const token = store.get(supabaseCookieName())?.value || '';
+    const store = cookies(); // sync (no await)
+    const token = getAccessTokenFromCookies(store);
     const supabase = supabaseWithBearer(token);
 
-    // who is calling (used for approved request match)
-    const { data: me, error: meErr } = await supabase.auth.getUser();
-    if (meErr || !me?.user?.id) return jsonError('Not signed in', 401);
-    const uid = me.user.id;
-
-    // A) Approved request exists?
-    const { data: reqRow, error: reqErr } = await supabase
-      .from('delivery_requests')
-      .select('id, status')
-      .eq('customer_id', uid)
-      .eq('area_tag', area_tag)
-      .eq('delivery_slot_at', new Date(delivery_slot_at).toISOString())
-      .single();
-
-    if (!reqErr && reqRow && reqRow.status === 'approved') {
-      return NextResponse.json({ ok: true, reason: 'approved_request' });
-    }
-
-    // B) Radius/coverage availability (best effort across likely schemas)
-    // 1) Area exists & active?
-    //    We attempt to select several possible columns; supabase will return those that exist.
-    const { data: area, error: areaErr } = await supabase
-      .from('areas')
-      .select('tag, active, driver_count, drivers_online, min_staff, capacity')
-      .eq('tag', area_tag)
-      .maybeSingle?.() || { data: null, error: null }; // .maybeSingle() may not exist in your version
-
-    // If your client doesn't have maybeSingle, fallback:
-    // const { data: areasList, error: areaErr } = await supabase.from('areas').select('...').eq('tag', area_tag).limit(1);
-    // const area = areasList && areasList[0];
-
-    if (areaErr) {
-      // If areas table is missing or not accessible, fall through: treat as not available
-    }
-
-    let areaActive = false;
-    if (area && typeof area === 'object') {
-      if ('active' in area) areaActive = !!area.active;
-      else areaActive = true; // assume active if column not present
-    }
-
-    // 2) Is there at least one staff/exec covering this area?
-    // Try user_areas(area_tag, active) first
-    let coveringCount = 0;
-    try {
-      const ua = await supabase
-        .from('user_areas')
-        .select('user_id')
-        .eq('area_tag', area_tag)
-        .eq('active', true)
-        .limit(1);
-      if (!ua.error && Array.isArray(ua.data) && ua.data.length > 0) {
-        coveringCount = 1;
-      }
-    } catch {}
-
-    // If none found, fallback: profiles with default_area_tag = area_tag (if that column exists), else profiles with role flags
-    if (coveringCount === 0) {
+    // A) If caller is signed in and has an approved request, pass immediately
+    let uid = null;
+    if (token) {
       try {
-        const pf = await supabase
-          .from('profiles')
-          .select('user_id, is_staff, is_executive, default_area_tag')
-          .or('is_staff.eq.true,is_executive.eq.true')
-          .eq('default_area_tag', area_tag)
-          .limit(1);
-        if (!pf.error && Array.isArray(pf.data) && pf.data.length > 0) {
-          coveringCount = 1;
-        }
+        const { data: me } = await supabase.auth.getUser();
+        uid = me?.user?.id || null;
       } catch {}
     }
+    if (uid) {
+      const { data: reqRow, error: reqErr } = await supabase
+        .from('delivery_requests')
+        .select('id, status')
+        .eq('customer_id', uid)
+        .eq('area_tag', area_tag)
+        .eq('delivery_slot_at', new Date(delivery_slot_at).toISOString())
+        .maybeSingle();
 
-    // Last fallback: area capacity style fields (driver_count / min_staff / drivers_online / capacity)
-    if (coveringCount === 0 && area && typeof area === 'object') {
-      const candidates = [
-        Number(area.driver_count),
-        Number(area.drivers_online),
-        Number(area.min_staff),
-        Number(area.capacity),
-      ].filter((n) => Number.isFinite(n));
-      if (candidates.some((n) => n > 0)) coveringCount = 1;
+      if (!reqErr && reqRow?.status === 'approved') {
+        return NextResponse.json({ ok: true, reason: 'approved_request' });
+      }
     }
 
-    if (areaActive && coveringCount > 0) {
-      return NextResponse.json({ ok: true, reason: 'radius_ok' });
+    // B) Permissive: if the area exists at all, allow it
+    const { data: areaRow } = await supabase
+      .from('areas')
+      .select('tag')
+      .eq('tag', area_tag)
+      .maybeSingle();
+
+    if (areaRow?.tag === area_tag) {
+      return NextResponse.json({ ok: true, reason: 'area_exists_open_delivery' });
     }
 
-    return jsonError('No approved request or available coverage for this slot/area', 409);
+    // If the areas table is empty/inaccessible, optionally allow everything:
+    if (process.env.OPEN_DELIVERY_FALLBACK === 'true') {
+      return NextResponse.json({ ok: true, reason: 'fallback_open_delivery' });
+    }
+
+    // Otherwise, area unknown → not available
+    return jsonError('Area not recognized for delivery', 409, { code: 'AREA_UNKNOWN' });
   } catch (e) {
     const msg = (e && e.message) || 'Unexpected error';
     return jsonError(msg, 500);
