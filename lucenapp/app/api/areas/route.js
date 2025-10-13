@@ -23,11 +23,9 @@ export async function GET(req) {
     const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 500) : 200;
 
     const supabase = supabaseAnon();
-    const selectCols = fields === 'all' ? '*' : 'tag,name,state';
-
     const { data, error } = await supabase
       .from('areas')
-      .select(selectCols)
+      .select(fields === 'all' ? '*' : 'tag,name,active')
       .order('name', { ascending: true })
       .limit(limit);
 
@@ -37,23 +35,20 @@ export async function GET(req) {
 
     let items = Array.isArray(data) ? data : [];
 
-    // Map to a consistent shape
-    items = items.map((a) => {
-      const active = (a.state ?? '').toString().toLowerCase() === 'active';
-      return {
-        tag: String(a.tag),
-        name: a.name ?? String(a.tag),
-        active,
-        ...(fields === 'all' ? { state: a.state } : {}),
-      };
-    });
+    // Normalize shape
+    items = items.map(a => ({
+      tag: String(a.tag),
+      name: a.name ?? String(a.tag),
+      active: typeof a.active === 'boolean' ? a.active : true,
+      ...(fields === 'all' ? { active_raw: a.active } : {}),
+    }));
 
-    // If active filter requested, apply it
+    // Apply active filter if requested
     if (wantActive !== null) {
-      items = items.filter((a) => a.active === wantActive);
+      items = items.filter(a => a.active === wantActive);
     }
 
-    // Trim to basic if requested
+    // Trim to basic shape if requested
     if (fields !== 'all') {
       items = items.map(({ tag, name, active }) => ({ tag, name, active }));
     }
