@@ -5,47 +5,141 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { createRouteHandlerClient } from '@supabase/auth-helpers-nextjs';
+import { createClient as createSupabaseServer } from '@supabase/supabase-js';
 import Stripe from 'stripe';
 import crypto from 'node:crypto';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: '2024-06-20' });
 
+/* ========= helpers ========= */
 function jsonError(msg, status = 400, extra = {}) {
   return NextResponse.json({ ok: false, error: msg, ...extra }, { status });
 }
-function isIsoDate(s) { if (!s || typeof s !== 'string') return false; const d = new Date(s); return !Number.isNaN(d.getTime()); }
-function is20MinBoundary(iso) { const d = new Date(iso); return d.getUTCSeconds() === 0 && d.getUTCMilliseconds() === 0 && d.getUTCMinutes() % 20 === 0; }
-function cents(n) { const x = Number(n); return Number.isFinite(x) ? Math.max(0, Math.round(x)) : 0; }
+function isIsoDate(s) {
+  if (!s || typeof s !== 'string') return false;
+  const d = new Date(s);
+  return !Number.isNaN(d.getTime());
+}
+function is20MinBoundary(iso) {
+  const d = new Date(iso);
+  return d.getUTCSeconds() === 0 && d.getUTCMilliseconds() === 0 && d.getUTCMinutes() % 20 === 0;
+}
+function cents(n) {
+  const x = Number(n);
+  return Number.isFinite(x) ? Math.max(0, Math.round(x)) : 0;
+}
 function stableKeyFromOrder(orderTempId) {
   const base = orderTempId || 'noorder';
   return 'intent_' + crypto.createHash('sha256').update(base).digest('hex').slice(0, 16);
 }
+// Supabase cookie name from project ref
+function supabaseCookieName() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+  const m = url.match(/^https?:\/\/([a-z0-9-]+)\.supabase\.co/i);
+  const ref = m?.[1] || '';
+  return ref ? `sb-${ref}-auth-token` : '';
+}
+// Extract access_token from Supabase auth cookie JSON
+function parseAccessTokenFromCookie(rawCookieValue) {
+  if (!rawCookieValue) return null;
+  try {
+    const decoded = decodeURIComponent(rawCookieValue);
+    const obj = JSON.parse(decoded);
+    return obj?.access_token || obj?.currentSession?.access_token || null;
+  } catch {
+    return null;
+  }
+}
 
+/* ========= handler ========= */
 export async function POST(req) {
   try {
     const body = await req.json().catch(() => ({}));
 
+    // Accept common aliases
     const area_tag = (body.area_tag ?? body.areaTag ?? body.area ?? '').toString().trim();
-    const delivery_slot_at = (body.delivery_slot_at ?? body.deliverySlotAt ?? body.slotAt ?? body.slot ?? '').toString().trim();
+    const delivery_slot_at = (
+      body.delivery_slot_at ??
+      body.deliverySlotAt ??
+      body.slotAt ??
+      body.slot ??
+      ''
+    ).toString().trim();
     const cartTotalCents = cents(body.cartTotalCents ?? body.totalCents ?? body.amount ?? 0);
-    const reservationId = typeof body.reservationId === 'string' && body.reservationId.trim() ? body.reservationId.trim() : null;
-    const orderTempId = typeof body.orderTempId === 'string' && body.orderTempId.trim() ? body.orderTempId.trim() : null;
+    const reservationId =
+      typeof body.reservationId === 'string' && body.reservationId.trim()
+        ? body.reservationId.trim()
+        : null;
+    const orderTempId =
+      typeof body.orderTempId === 'string' && body.orderTempId.trim()
+        ? body.orderTempId.trim()
+        : null;
     const purchaseTier = (body.tier || body.purchaseTier || '').toString();
 
     if (!area_tag) return jsonError('area_tag is required', 422, { field: 'area_tag' });
-    if (!isIsoDate(delivery_slot_at)) return jsonError('delivery_slot_at must be an ISO datetime', 422, { field: 'delivery_slot_at' });
-    if (!is20MinBoundary(delivery_slot_at)) return jsonError('Slot must be on a 20-minute boundary (e.g., 10:00, 10:20, 10:40 UTC)', 422, { field: 'delivery_slot_at' });
+    if (!isIsoDate(delivery_slot_at))
+      return jsonError('delivery_slot_at must be an ISO datetime', 422, { field: 'delivery_slot_at' });
+    if (!is20MinBoundary(delivery_slot_at))
+      return jsonError('Slot must be on a 20-minute boundary (e.g., 10:00, 10:20, 10:40 UTC)', 422, { field: 'delivery_slot_at' });
     if (!cartTotalCents) return jsonError('cartTotalCents is required', 422, { field: 'cartTotalCents' });
 
-    // Supabase session
+    // ---------- Robust Supabase auth ----------
     const store = cookies();
     const supabase = createRouteHandlerClient({ cookies: () => store });
-    const { data: { user }, error: meErr } = await supabase.auth.getUser();
-    if (meErr || !user?.id) return jsonError('Not signed in', 401, { code: 'AUTH_REQUIRED' });
+
+    let user = null;
+    let meErr = null;
+    try {
+      const r = await supabase.auth.getUser();
+      user = r?.data?.user ?? null;
+      meErr = r?.error ?? null;
+    } catch (e) { meErr = e; }
+
+    if (!user?.id) {
+      // Fallback: read the Supabase auth cookie directly and verify via Bearer
+      const cookieName = supabaseCookieName();
+      const raw = cookieName ? store.get(cookieName)?.value : null;
+      const accessToken = parseAccessTokenFromCookie(raw);
+      if (accessToken) {
+        try {
+          const svc = createSupabaseServer(
+            process.env.NEXT_PUBLIC_SUPABASE_URL,
+            process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+            {
+              global: { headers: { Authorization: `Bearer ${accessToken}` } },
+              auth: { persistSession: false, autoRefreshToken: false },
+            }
+          );
+          const { data: u2, error: e2 } = await svc.auth.getUser();
+          if (u2?.user?.id) {
+            user = u2.user;
+            meErr = null;
+          } else if (e2) {
+            meErr = e2;
+          }
+        } catch {
+          // ignore; we'll 401 below
+        }
+      }
+    }
+
+    if (!user?.id) {
+      const cookieName = supabaseCookieName();
+      const present = cookieName ? !!store.get(cookieName) : false;
+      return jsonError('Not signed in', 401, {
+        code: 'AUTH_REQUIRED',
+        debug: {
+          supabaseUrlRef: (process.env.NEXT_PUBLIC_SUPABASE_URL || '').match(/\/\/([^.]+)\.supabase\.co/)?.[1] || null,
+          cookieName,
+          cookiePresent: present,
+          cookieLength: present ? (store.get(cookieName)?.value?.length || 0) : 0,
+        }
+      });
+    }
     const uid = user.id;
 
-    // Validate coverage
-    const origin = new URL(req.url).origin; 
+    // ---------- Coverage validation ----------
+    const origin = new URL(req.url).origin; // always current deployment
     const v = await fetch(`${origin}/api/areas/validate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -58,11 +152,11 @@ export async function POST(req) {
         code: vj?.code || 'DELIVERY_UNAVAILABLE',
         reason: vj?.reason,
         nextSlots: vj?.nextSlots,
-        debug: vj?.debug, // ← SEE EXACT CAUSE IN NETWORK RESPONSE (esp. on preview)
+        debug: vj?.debug,
       });
     }
 
-    // Optional loyalty reservation
+    // ---------- Loyalty reservation (optional) ----------
     let discountCents = 0;
     if (reservationId) {
       const { data: rsv, error: rErr } = await supabase
@@ -86,11 +180,11 @@ export async function POST(req) {
 
     const amountCents = Math.max(0, cartTotalCents - discountCents);
 
-    // Reuse/update PI when possible
+    // ---------- Stripe PaymentIntent reuse/update ----------
     const cookieName = orderTempId ? `pi_${orderTempId}` : 'payment_intent_id';
     const existingPiId = store.get(cookieName)?.value || null;
-    let intent = null;
 
+    let intent = null;
     try {
       if (existingPiId) {
         const current = await stripe.paymentIntents.retrieve(existingPiId);
@@ -112,7 +206,7 @@ export async function POST(req) {
         }
       }
     } catch {
-      // ignore; we'll create new
+      // If retrieve/update fails, we'll create new below
     }
 
     if (!intent) {
@@ -147,7 +241,7 @@ export async function POST(req) {
       delivery_slot_at,
       orderTempId: orderTempId || null,
       validation: vj?.reason || 'validated',
-      debug: vj?.debug // helpful in preview
+      debug: vj?.debug // helpful if validator adds context
     });
 
     // Persist PI id (httpOnly cookie)
@@ -161,6 +255,7 @@ export async function POST(req) {
 
     return res;
   } catch (e) {
+    // Attempt recovery if Stripe raised a conflict and we have a PI in cookies
     const store = cookies();
     const piFallback =
       store.get('payment_intent_id')?.value ||
@@ -176,7 +271,9 @@ export async function POST(req) {
           clientSecret: existing.client_secret,
           status: existing.status,
         });
-      } catch {}
+      } catch {
+        // ignore and fall through
+      }
     }
 
     return jsonError(e?.message || 'Unexpected error', e?.statusCode ?? 500, {
@@ -186,3 +283,4 @@ export async function POST(req) {
     });
   }
 }
+
