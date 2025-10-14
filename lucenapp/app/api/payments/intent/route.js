@@ -115,6 +115,7 @@ export async function POST(req) {
             user = u2.user;
             meErr = null;
           } else if (e2) {
+           // eslint-disable-next-line @typescript-eslint/no-unused-vars
             meErr = e2;
           }
         } catch {
