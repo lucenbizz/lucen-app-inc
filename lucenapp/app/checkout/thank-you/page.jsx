@@ -1,22 +1,32 @@
+// app/checkout/thank-you/page.jsx
 'use client';
 
+export const dynamic = 'force-dynamic';
+
+import { Suspense, useMemo } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { useMemo } from 'react';
 
 export default function ThankYouPage() {
+  return (
+    <Suspense fallback={<PageShell><p className="text-gray-400">Loading…</p></PageShell>}>
+      <ThankYouInner />
+    </Suspense>
+  );
+}
+
+function ThankYouInner() {
   const params = useSearchParams();
   const sessionId = params.get('session_id');
 
   const shortId = useMemo(() => {
     if (!sessionId) return '';
-    // prettify for display only (not used for API calls)
     return sessionId.length > 10
       ? `${sessionId.slice(0, 8)}…${sessionId.slice(-6)}`
       : sessionId;
   }, [sessionId]);
 
   return (
-    <main className="min-h-screen bg-black text-white flex items-center justify-center p-6">
+    <PageShell>
       <div className="w-full max-w-2xl border border-gray-800 rounded-2xl p-8 bg-black/70 backdrop-blur-sm">
         <div className="flex items-center gap-3">
           <div className="h-10 w-10 rounded-full bg-yellow-400 flex items-center justify-center">
@@ -62,6 +72,14 @@ export default function ThankYouPage() {
           take a moment to finalize fulfillment.
         </div>
       </div>
+    </PageShell>
+  );
+}
+
+function PageShell({ children }) {
+  return (
+    <main className="min-h-screen bg-black text-white flex items-center justify-center p-6">
+      {children}
     </main>
   );
 }
