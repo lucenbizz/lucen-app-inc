@@ -45,7 +45,7 @@ export async function POST(req) {
     const uid = user.id;
 
     // Validate coverage
-    const origin = process.env.NEXT_PUBLIC_APP_ORIGIN || req.nextUrl.origin;
+    const origin = new URL(req.url).origin; 
     const v = await fetch(`${origin}/api/areas/validate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
